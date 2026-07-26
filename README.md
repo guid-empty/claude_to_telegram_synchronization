@@ -1,3 +1,5 @@
+*[🇬🇧 English version](README.en.md)*
+
 # claude_to_telegram
 
 Skill для [Claude Code](https://claude.com/claude-code): двусторонняя связь с Claude через Telegram, когда
@@ -59,7 +61,7 @@ Claude:
 | `/claude_to_telegram` | Показать возможности без изменения состояния |
 
 Полная документация (протокол, ограничения, внутреннее устройство) — в [`SKILL.md`](SKILL.md), это же
-файл, который читает Claude при вызове skill'а.
+файл, который читает Claude при вызове skill'а. Английская справочная копия — [`SKILL.en.md`](SKILL.en.md).
 
 ## Файлы
 

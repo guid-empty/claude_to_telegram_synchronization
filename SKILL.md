@@ -117,6 +117,15 @@ TOKEN=$(python3 -c "import json; print(json.load(open('$HOME/.claude/skills/clau
 curl -s "https://api.telegram.org/bot${TOKEN}/getUpdates?limit=20" | python3 -m json.tool
 ```
 
+**Multi-session safety:** `ask.py` and `check_new.py` never call `getUpdates` with `offset > 0`. Telegram's
+`getUpdates` is a single-consumer API — any call with a positive offset confirms ("forgets") every prior
+update on the server, for *every* client of that bot token, not just the caller. With several parallel
+Claude Code sessions sharing one bot (common — each has its own `session_id`), a positive offset from one
+session can silently erase a message meant for another session before it's ever read, with no trace and no
+way to recover it. Both scripts track "what's already been seen" purely locally, in
+`.last_offset_<session_id>.json`, and always query with `offset=0`. If you ever add a new script that talks
+to `getUpdates`, follow the same rule — never advance the offset server-side.
+
 ### Emulating AskUserQuestion (multiple-choice question)
 
 The native `AskUserQuestion` (with buttons) isn't reachable from Telegram in background mode — hooks are

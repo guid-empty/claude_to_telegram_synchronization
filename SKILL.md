@@ -1,190 +1,197 @@
 ---
 name: claude_to_telegram
-description: Двусторонняя связь с пользователем через Telegram-бота, когда он явно просит работать в фоне/удалённо — не hooks Claude Code, а прямой Bash-вызов ask.py/notify.py. Вызывать, когда пользователь просит «работай в фоне», «спрашивай/пиши статус в Telegram», «дальше общение через бота», даёт session_id для связи, явно вызывает /claude_to_telegram, или /claude_to_telegram on|off. НЕ применять как постоянное поведение — только по явному запросу на конкретную сессию.
+description: Two-way communication with the user via a Telegram bot, when they explicitly ask to work in the background/remotely — not Claude Code hooks, a direct Bash call to ask.py/notify.py. Trigger when the user says "work in the background", "send questions/status to Telegram", "let's talk through the bot from now on", gives a session_id to use, explicitly invokes /claude_to_telegram, or /claude_to_telegram on|off. Do NOT apply as a standing behavior — only on explicit request, for one specific session.
 argument-hint: "install | on|off [session_id]"
 ---
 
-# claude_to_telegram — общение с пользователем через Telegram вместо обычного интерфейса
+# claude_to_telegram — talking to the user over Telegram instead of the normal interface
 
-Минимальный сервис двусторонней связи с пользователем через Telegram — без hooks Claude Code вообще
-(`PermissionRequest`/`AskUserQuestion`). Claude сам, явно, через обычный Bash tool call отправляет
-сообщение и (опционально) блокируется в ожидании ответа через `getUpdates`. Никакого персистентного демона
-не требуется — каждый вызов сам поднимает long-polling на время своего выполнения и завершается.
+A minimal two-way communication service with the user over Telegram — no Claude Code hooks at all
+(`PermissionRequest`/`AskUserQuestion`). Claude explicitly calls a plain Bash tool, which sends a message
+and (optionally) blocks waiting for a reply via `getUpdates`. No persistent daemon required — each
+invocation runs its own long-poll for the duration of the call and then exits.
 
-## Требования
+## Requirements
 
-- Свой Telegram-бот (через [@BotFather](https://t.me/BotFather)) и свой `chat_id`
-  (через [@userinfobot](https://t.me/userinfobot)) — credentials не шарятся, каждый заводит свои
-- `config.json` в этой же папке: `{"token": "...", "chat_id": "..."}`, `chmod 600`, не коммитить —
-  см. "Установка" ниже, заполняется автоматически
-- Для автопроверки в фоне (см. ниже) — нужен доступ к `CronCreate`/`CronDelete`; их наличие зависит от
-  среды выполнения Claude Code
+- Your own Telegram bot (via [@BotFather](https://t.me/BotFather)) and your own `chat_id`
+  (via [@userinfobot](https://t.me/userinfobot)) — credentials aren't shared, everyone sets up their own
+- `config.json` in this same folder: `{"token": "...", "chat_id": "..."}`, `chmod 600`, never commit —
+  see "Setup" below, populated automatically
+- Periodic background checking (see below) needs access to `CronCreate`/`CronDelete`; availability depends
+  on the Claude Code runtime environment
 
-## Установка
+## Setup
 
-`/claude_to_telegram install` — первоначальная настройка `config.json`.
+`/claude_to_telegram install` — initial `config.json` setup.
 
-1. Если `config.json` уже существует — сообщить, для какого `chat_id` он настроен (не показывать сам
-   токен), спросить, точно ли нужно перенастроить. Если да — продолжить, иначе остановиться.
-2. Если нет — коротко объяснить пользователю, как получить оба значения: токен от
-   [@BotFather](https://t.me/BotFather) (`/newbot`), `chat_id` от [@userinfobot](https://t.me/userinfobot).
-   Попросить прислать оба значения текстом **здесь, в обычном интерфейсе** — на этом этапе бота ещё нет,
-   ждать ответ через Telegram (`ask.py`) не имеет смысла.
-3. Получив оба значения:
+1. If `config.json` already exists — report which `chat_id` it's configured for (never show the token
+   itself), ask whether to actually reconfigure. If yes, continue; otherwise stop.
+2. If not — briefly explain how to get both values: a token from
+   [@BotFather](https://t.me/BotFather) (`/newbot`), a `chat_id` from
+   [@userinfobot](https://t.me/userinfobot). Ask the user to send both values as text **right here, in the
+   normal interface** — at this stage there's no working bot yet, so waiting for a reply via Telegram
+   (`ask.py`) makes no sense.
+3. Once both values are received:
    ```bash
    python3 ~/.claude/skills/claude_to_telegram/install.py --token "<TOKEN>" --chat-id "<CHAT_ID>"
    ```
-   Скрипт сам валидирует токен через `getMe`, отправляет тестовое сообщение на `chat_id` (проверяет, что
-   бот реально может писать этому пользователю), и только при успехе пишет `config.json` (`chmod 600`).
-   Он никогда не печатает токен обратно в вывод.
-4. При `FAIL` — сообщить пользователю точную причину из вывода скрипта (невалидный токен / бот не может
-   написать в этот `chat_id`) и попросить перепроверить значения, не гадая, что пошло не так.
-5. При `OK` — сообщить username бота, которым всё теперь настроено, и что можно переходить к `on`.
+   The script validates the token via `getMe`, sends a test message to `chat_id` (confirming the bot can
+   actually message this user), and only on success writes `config.json` (`chmod 600`). It never prints
+   the token back out.
+4. On `FAIL` — report the exact reason from the script's output (invalid token / bot can't message that
+   `chat_id`) and ask the user to double-check the values, rather than guessing what went wrong.
+5. On `OK` — report the bot's username now configured, and that it's ready for `on`.
 
-## Когда включать
+## When to enable
 
-Только по явной, разовой просьбе пользователя — не всегда и не по умолчанию. Включается либо явной
-командой `/claude_to_telegram on` / `/claude_to_telegram off` (см. "Аргументы" ниже), либо естественной
-фразой: "работай в фоне, вопросы — в Telegram", "дальше общаемся через бота", "вот id сессии — с этим id
-переходим в режим общения в Telegram".
+Only on an explicit, one-off request from the user — never as a default or standing behavior. Enabled
+either via an explicit command, `/claude_to_telegram on` / `/claude_to_telegram off` (see "Arguments"
+below), or a natural phrase: "work in the background, questions go to Telegram", "let's talk through the
+bot from now on", "here's a session id — let's switch to talking over Telegram with it".
 
-## Аргументы
+## Arguments
 
-Синтаксис: `/claude_to_telegram on|off [session_id]` — `session_id` третьим словом опционален.
+Syntax: `/claude_to_telegram on|off [session_id]` — `session_id` as a third word is optional.
 
 `/claude_to_telegram on [session_id]`:
-1. Определить `session_id`:
-   - если передан явно (аргументом команды, или назван пользователем ранее в этом разговоре) —
-     использовать его;
-   - иначе — сгенерировать автоматически: `<имя-проекта>-<первые 8 символов session UUID>`. Имя проекта —
-     последний компонент `cwd`. Session UUID — взять из своего system prompt: он есть в пути scratchpad-
-     директории ("Scratchpad Directory" в system prompt, вида
-     `.../claude-501/-Users-.../<UUID>/scratchpad`) — использовать `<UUID>`, не искать его отдельным tool
-     call'ом.
-2. Сообщить пользователю (в обычном интерфейсе) итоговый `session_id`, который будешь использовать.
-3. Отправить `notify.py --session <id> --message "Фоновый режим включён"` — это и подтверждение доставки,
-   и явная точка отсчёта для пользователя в Telegram.
-4. Создать recurring `CronCreate` job для автопроверки (см. "Автопроверка, пока сессия простаивает" ниже)
-   — запомнить его job id для последующего `CronDelete`.
-5. С этого хода — следовать протоколу ниже ("Протокол работы в фоновом режиме") в конце каждого хода,
-   пока не поступит явный сигнал выключить.
+1. Determine the `session_id`:
+   - if given explicitly (as a command argument, or named by the user earlier in this conversation) — use
+     it;
+   - otherwise — generate one automatically: `<project-name>-<first 8 chars of the session UUID>`. Project
+     name is the last component of `cwd`. The session UUID comes from your own system prompt — it's
+     present in the scratchpad directory path ("Scratchpad Directory" in the system prompt, of the form
+     `.../claude-501/-Users-.../<UUID>/scratchpad`) — use `<UUID>` from there, don't look it up with a
+     separate tool call.
+2. Tell the user (in the normal interface) the final `session_id` you'll be using.
+3. Send `notify.py --session <id> --message "Background mode enabled"` — this both confirms delivery and
+   gives the user a clear starting point in Telegram.
+4. Create a recurring `CronCreate` job for background polling (see "Polling while the session is idle"
+   below) — remember its job id for the later `CronDelete`.
+5. From this turn on — follow the protocol below ("Background mode protocol") at the end of every turn,
+   until an explicit signal to stop arrives.
 
 `/claude_to_telegram off [session_id]`:
-1. Если фоновый режим был включён в этом разговоре — отправить
-   `notify.py --session <id> --message "Фоновый режим выключен"`.
-2. `CronDelete` job, созданный на шаге `on` — иначе он продолжит тикать вхолостую.
-3. Вернуться к обычному завершению хода, без блокирующих вызовов `ask.py`.
+1. If background mode was enabled in this conversation — send
+   `notify.py --session <id> --message "Background mode disabled"`.
+2. `CronDelete` the job created in the `on` step — otherwise it keeps ticking for nothing.
+3. Return to normal turn completion, no more blocking `ask.py` calls.
 
-`/claude_to_telegram` без аргументов — просто загрузить эту инструкцию в контекст (объяснить/использовать
-по смыслу), не менять текущее состояние сессии.
+`/claude_to_telegram` with no arguments — just load this instruction into context (explain/use it as
+appropriate), don't change the session's current state.
 
-**Команда `off`, присланная из самого Telegram** (поймана `check_new.py` на очередном cron-тике, текст
-содержит "off" или явно похож на команду выключения) — обрабатывать так же, как явную `/claude_to_telegram
-off` здесь: выполнить шаги 1-3 выше, а не как обычное сообщение-инструкцию для продолжения работы.
+**An `off` command sent from within Telegram itself** (caught by `check_new.py` on a cron tick, text
+contains "off" or clearly reads as a stop command) — handle it the same way as an explicit
+`/claude_to_telegram off` here: run steps 1-3 above, not as an ordinary message to act on and keep working.
 
-## Как выполнять
+## How to run it
 
-Оба скрипта лежат прямо в этой папке скилла (`~/.claude/skills/claude_to_telegram/`), конфиг
-(`config.json`, токен+chat_id) — там же, chmod 600, не коммитить никуда.
+Both scripts live directly in this skill's folder (`~/.claude/skills/claude_to_telegram/`), the config
+(`config.json`, token + chat_id) is right there too, `chmod 600`, never committed anywhere.
 
-### Задать вопрос и дождаться ответа
+### Ask a question and wait for a reply
 
 ```bash
 python3 ~/.claude/skills/claude_to_telegram/ask.py \
-  --session <session_id> --message "<вопрос>" --timeout <SECONDS>
+  --session <session_id> --message "<question>" --timeout <SECONDS>
 ```
 
-Печатает текст ответа (без упоминания session_id) в stdout, exit 0. При таймауте — `NO_RESPONSE_TIMEOUT`,
-exit 1. Ответ пользователя должен содержать `session_id` где угодно в тексте — это и есть привязка к
-конкретной сессии (позволяет не путать параллельные Claude Code сессии, отвечающие через один и тот же бот).
+Prints the reply text (session_id stripped out) to stdout, exit 0. On timeout — `NO_RESPONSE_TIMEOUT`,
+exit 1. The user's reply needs to contain the `session_id` somewhere in the text — that's what ties it to
+this specific session (and keeps parallel Claude Code sessions replying through the same bot from getting
+crossed wires).
 
-**Выбор режима вызова:**
-- Быстрая интерактивная проверка (прямо сейчас, в разговоре) — обычный foreground Bash-вызов, таймаут в
-  минутах.
-- Реальный "ушёл, отвечу когда смогу" — `run_in_background: true` с большим `--timeout` (часы) — не
-  блокировать текущий ход, дождаться уведомления о завершении фоновой задачи, затем обработать результат
-  и явно сообщить пользователю в обычном интерфейсе: что получено, как продолжаю.
+**Choosing how to call it:**
+- Quick interactive check (right now, mid-conversation) — a plain foreground Bash call, timeout in
+  minutes.
+- The real "I'm stepping away, I'll reply when I can" case — `run_in_background: true` with a large
+  `--timeout` (hours) — don't block the current turn, wait for the background-task notification, then
+  process the result and explicitly tell the user, in the normal interface, what was received and how
+  you're proceeding.
 
-**Известное ограничение:** короткие синхронные окна ненадёжны, если человек отвечает непредсказуемо позже
-— сообщение при этом НЕ теряется (остаётся в очереди Telegram), просто активный `getUpdates`-poll уже не
-слушает. Если окно истекло без ответа — не считать это провалом сразу, проверить вручную, реально ли
-что-то приходило:
+**Known limitation:** short synchronous windows are unreliable if the person replies later than expected —
+the message isn't lost (it stays queued in Telegram), it's just that the active `getUpdates` poll has
+already stopped listening. If a window expires with no reply, don't treat that as a failure right away —
+check manually whether something actually came in:
 ```bash
 TOKEN=$(python3 -c "import json; print(json.load(open('$HOME/.claude/skills/claude_to_telegram/config.json'))['token'])")
 curl -s "https://api.telegram.org/bot${TOKEN}/getUpdates?limit=20" | python3 -m json.tool
 ```
 
-### Эмуляция AskUserQuestion (вопрос с вариантами)
+### Emulating AskUserQuestion (multiple-choice question)
 
-Нативный `AskUserQuestion` (с кнопками) в фоновом режиме недоступен Telegram — hooks сняты намеренно
-(см. выше). Если нужен вопрос с вариантами, а не свободный текст — форматировать варианты прямо в тексте
-`--message`, пронумеровав их:
+The native `AskUserQuestion` (with buttons) isn't reachable from Telegram in background mode — hooks are
+intentionally not used (see above). If you need a multiple-choice question rather than free text — format
+the options directly in the `--message` text, numbered:
 
 ```
-<вопрос>
+<question>
 
-1. <вариант A> — <краткое описание, если нужно>
-2. <вариант B> — <краткое описание>
-3. <вариант C> — <краткое описание>
+1. <option A> — <short description if useful>
+2. <option B> — <short description>
+3. <option C> — <short description>
 
-Ответь номером или своим текстом.
+Reply with a number or your own text.
 ```
 
-Ответ от `ask.py` — обычный текст (номер вроде "2" или свободный текст). Интерпретация "это выбор варианта
-N" или "это свободный ответ" — на стороне модели после получения результата, не в самом скрипте: если
-ответ — короткое число, совпадающее с одним из вариантов, трактовать как выбор этого варианта; иначе —
-как произвольный ответ (аналог "Other" в нативном `AskUserQuestion`).
+The reply from `ask.py` is plain text (a number like "2", or free text). Interpreting "this is a choice of
+option N" vs. "this is a free-form answer" happens on the model's side after getting the result, not in
+the script itself: if the reply is a short number matching one of the options, treat it as that choice;
+otherwise treat it as a free-form answer (the equivalent of "Other" in the native `AskUserQuestion`).
 
-### Автопроверка, пока сессия простаивает (CronCreate)
+### Polling while the session is idle (CronCreate)
 
-**Важное ограничение архитектуры:** ни `ask.py`, ни какой-либо hook не могут "разбудить" сессию, которая
-уже закончила ход и ждёт следующего сообщения пользователя в обычном интерфейсе — сообщение, отправленное
-в Telegram, когда никто не слушает, просто висит в очереди непрочитанным. Это фундаментальное свойство:
-hooks перехватывают уже идущее взаимодействие, но не инициируют новое.
+**A fundamental architectural limitation:** neither `ask.py` nor any hook can "wake up" a session that has
+already finished its turn and is waiting for the user's next message in the normal interface — a message
+sent to Telegram while nobody's listening just sits unread in the queue. This is inherent: hooks intercept
+an interaction that's already in progress, they don't initiate a new one.
 
-Единственный найденный рабочий способ — `CronCreate` (session-only планировщик, отдельный от hooks):
-джоб "fires while the REPL is idle", то есть реально может enqueue новый промпт в момент простоя.
+The only working approach found so far is `CronCreate` (a session-only scheduler, separate from hooks): a
+job "fires while the REPL is idle", meaning it can genuinely enqueue a new prompt at the moment the session
+goes quiet.
 
 ```
 python3 ~/.claude/skills/claude_to_telegram/check_new.py --session <session_id>
 ```
 
-Не блокирует (в отличие от `ask.py`) — мгновенно проверяет `getUpdates`, печатает новые сообщения (текст,
-session_id вырезан) или `NOTHING_NEW`. Хранит last-seen offset в
-`.last_offset_<session_id>.json` в этой же папке — повторные вызовы идемпотентны, не повторяют одно и то
-же сообщение.
+Non-blocking (unlike `ask.py`) — checks `getUpdates` instantly, prints any new messages (text,
+`session_id` stripped) or `NOTHING_NEW`. Keeps a last-seen offset in
+`.last_offset_<session_id>.json` in this same folder — repeated calls are idempotent, the same message
+never gets reported twice.
 
-При включении фонового режима — создать recurring cron job (пример, каждые 10 минут, сдвинуто от :00/:30):
+When enabling background mode — create a recurring cron job (example, every 10 minutes, offset from
+:00/:30):
 ```
-CronCreate(cron="7,17,27,37,47,57 * * * *", recurring=true, prompt="Проверь новые сообщения в Telegram:
-запусти python3 ~/.claude/skills/claude_to_telegram/check_new.py --session <session_id>. Если вывод —
-NOTHING_NEW, ничего не делай и не пиши пользователю. Если есть текст — обработай как новое сообщение от
-пользователя, явно напиши что получено, продолжай.")
+CronCreate(cron="7,17,27,37,47,57 * * * *", recurring=true, prompt="Check for new Telegram messages: run
+python3 ~/.claude/skills/claude_to_telegram/check_new.py --session <session_id>. If the output is
+NOTHING_NEW, do nothing and don't write anything to the user. If there's text — treat it as a new message
+from the user, explicitly say what was received, then continue.")
 ```
 
-**Известные ограничения CronCreate:** job живёт только в этой сессии (не на диске — если сессия/CLI
-закрывается, job пропадает, придётся создавать заново при следующем включении режима); auto-expire через
-7 дней; каждый тик — реальный inference-вызов (расход токенов), даже когда `NOTHING_NEW`. При выключении
-режима (`off`) — обязательно `CronDelete` этот job, иначе он продолжит тикать вхолостую.
+**Known limitations of CronCreate:** the job only lives in this session (not on disk — if the
+session/CLI closes, the job is gone, it has to be recreated the next time background mode is enabled);
+auto-expires after 7 days; every tick is a real inference call (spends tokens) even when the result is
+`NOTHING_NEW`. When disabling the mode (`off`) — always `CronDelete` this job, otherwise it keeps ticking
+for nothing.
 
-### Просто уведомить (без ожидания ответа)
+### Just notify (no reply expected)
 
 ```bash
-python3 ~/.claude/skills/claude_to_telegram/notify.py --session <session_id> --message "<статус>"
+python3 ~/.claude/skills/claude_to_telegram/notify.py --session <session_id> --message "<status>"
 ```
 
-## Протокол работы в фоновом режиме
+## Background mode protocol
 
-В конце каждого хода вместо обычного завершения — вызвать `ask.py` с кратким summary сделанного и
-вопросом "что дальше" (или просто явно спросить следующий шаг). Получив ответ — явно написать в обычном
-интерфейсе: "получил ответ: ..., продолжаю так-то" — пользователь должен видеть в обычном чате, что
-произошло, а не только в Telegram. Выйти из режима — как только пользователь явно попросит ("стоп, жди
-меня" или аналогично) — вернуться к обычному завершению хода без блокирующих вызовов.
+At the end of every turn, instead of finishing normally — call `ask.py` with a short summary of what was
+done and a "what's next" question (or just explicitly ask for the next step). Once a reply comes in,
+explicitly write in the normal interface: "got the reply: ..., proceeding as follows" — the user should be
+able to see, in the normal chat, what happened, not only in Telegram. Exit the mode as soon as the user
+explicitly asks ("stop, I'll be back" or similar) — return to finishing turns normally, no more blocking
+calls.
 
 ## Security
 
-- `config.json` не коммитить (в `.gitignore` этой папки)
-- Фильтрация входящих — по `chat.id` **и** `from.id`, совпадающим с конфигурационным `chat_id`; сообщения
-  от посторонних отправителей игнорируются
-- Если токен/chat_id где-то засветились в открытом виде — перевыпустить токен через `@BotFather` →
-  `/revoke`, обновить только `config.json`
+- Never commit `config.json` (it's in this folder's `.gitignore`)
+- Incoming messages are filtered by `chat.id` **and** `from.id` matching the configured `chat_id`;
+  messages from anyone else are ignored
+- If the token/chat_id ever leak in plain sight — reissue the token via `@BotFather` → `/revoke`, then
+  only update `config.json`

@@ -1,87 +1,90 @@
-*[🇬🇧 English version](README.en.md)*
+*[🇷🇺 Russian version](README.ru.md)*
 
 # claude_to_telegram
 
-Skill для [Claude Code](https://claude.com/claude-code): двусторонняя связь с Claude через Telegram, когда
-тебя нет за компьютером — approve/deny, ответы на вопросы, статус и новые инструкции с телефона.
+A skill for [Claude Code](https://claude.com/claude-code): two-way communication with Claude via
+Telegram, for when you're away from your computer — approvals, answers to questions, status updates, and
+new instructions from your phone.
 
-Не использует hooks Claude Code (`PermissionRequest`/`AskUserQuestion`) и не требует персистентного демона
-— Claude сам, явно, вызывает обычный скрипт, когда ему нужно спросить или сообщить статус.
+Doesn't use Claude Code hooks (`PermissionRequest`/`AskUserQuestion`) and doesn't require a persistent
+daemon — Claude explicitly calls a plain script whenever it needs to ask something or report status.
 
-## Зачем
+## Why
 
-Claude Code — интерактивный инструмент: обычно ты сидишь рядом и отвечаешь на вопросы/подтверждения прямо
-в терминале. Этот skill даёт альтернативный канал для тех моментов, когда это неудобно:
+Claude Code is an interactive tool — you're normally sitting right there, answering prompts and
+confirmations in the terminal. This skill gives you an alternative channel for the moments when that's
+not convenient:
 
-- Долгая автономная задача — хочется получать статус, не сидя у экрана
-- Нужно принять решение (approve/deny, выбор из вариантов), но ты не за компьютером
-- Хочется дать Claude новую инструкцию, пока он работает в фоне
+- A long autonomous task is running and you want status updates without staring at the screen
+- A decision is needed (approve/deny, pick an option), but you're not at your computer
+- You want to give Claude a new instruction while it's working in the background
 
-## Как это работает — пример
+## How it works — an example
 
-Ты говоришь Claude:
-> дальше работай в фоне, вопросы — в Telegram
+You tell Claude:
+> keep working in the background, send questions to Telegram from now on
 
 Claude:
-1. Отвечает в терминале, что переходит в фоновый режим, и присылает подтверждение в Telegram:
+1. Confirms in the terminal that it's switching to background mode, and sends a confirmation to Telegram:
    ```
-   🔔 [my-session] Фоновый режим включён
+   🔔 [my-session] Background mode enabled
    ```
-2. Продолжает работу. Если нужно решение — шлёт вопрос прямо в Telegram, с вариантами прямо в тексте:
+2. Keeps working. When a decision is needed, it sends the question straight to Telegram, with the options
+   formatted right in the text:
    ```
-   ❓ Как назвать новую фичу?
+   ❓ What should we call the new feature?
 
-   1. Вариант А — покороче
-   2. Вариант Б — понагляднее
+   1. Option A — shorter
+   2. Option B — more descriptive
 
-   Ответь номером или своим текстом.
+   Reply with a number or your own text.
    ```
-   Ты отвечаешь прямо в Telegram (`2` или своим текстом) — Claude получает ответ и продолжает.
-3. Если ты закрыл терминал и ушёл на несколько часов — Claude периодически (раз в ~10 минут, пока сессия
-   открыта) сам проверяет Telegram на новые сообщения. Написал что-то боту, не открывая чат с Claude —
-   через несколько минут Claude сам увидит сообщение и отреагирует.
-4. Когда закончил — `/claude_to_telegram off`, или просто напиши "стоп, жди меня" — Claude вернётся к
-   обычному режиму без уведомлений.
+   You reply directly in Telegram (`2` or free text) — Claude picks up the answer and continues.
+3. If you closed the terminal and stepped away for a few hours — Claude periodically (roughly every ~10
+   minutes, as long as the session is still open) checks Telegram for new messages on its own. Message the
+   bot without ever opening the chat with Claude, and within a few minutes Claude notices and reacts.
+4. When you're done — `/claude_to_telegram off`, or just say "stop, I'll be back" — Claude returns to
+   normal behavior with no more notifications.
 
-## Установка
+## Setup
 
-1. Скопировать эту папку в `~/.claude/skills/claude_to_telegram/`
-2. В Claude Code: `/claude_to_telegram install` — спросит токен бота и chat_id, сам всё проверит и
-   сохранит
+1. Copy this folder to `~/.claude/skills/claude_to_telegram/`
+2. In Claude Code: `/claude_to_telegram install` — it will ask for a bot token and chat_id, validate both
+   live, and save them
 
-Как получить токен и chat_id — см. `SKILL.md` → "Установка".
+For how to get a bot token and chat_id, see `SKILL.md` → "Setup".
 
-## Команды
+## Commands
 
-| Команда | Действие |
+| Command | Effect |
 |---|---|
-| `/claude_to_telegram install` | Первоначальная настройка (токен + chat_id) |
-| `/claude_to_telegram on [session_id]` | Включить фоновый режим |
-| `/claude_to_telegram off [session_id]` | Выключить фоновый режим |
-| `/claude_to_telegram` | Показать возможности без изменения состояния |
+| `/claude_to_telegram install` | Initial setup (bot token + chat_id) |
+| `/claude_to_telegram on [session_id]` | Enable background mode |
+| `/claude_to_telegram off [session_id]` | Disable background mode |
+| `/claude_to_telegram` | Show what's available without changing state |
 
-Полная документация (протокол, ограничения, внутреннее устройство) — в [`SKILL.md`](SKILL.md), это же
-файл, который читает Claude при вызове skill'а. Английская справочная копия — [`SKILL.en.md`](SKILL.en.md).
+Full documentation (protocol, limitations, internals) lives in [`SKILL.md`](SKILL.md) — the same file
+Claude reads when the skill is invoked. A Russian reference copy is at [`SKILL.ru.md`](SKILL.ru.md).
 
-## Файлы
+## Files
 
-- `SKILL.md` — инструкция для Claude (что делать по каждой команде)
-- `install.py` — настройка и валидация `config.json`
-- `ask.py` — отправить вопрос, дождаться ответа
-- `notify.py` — отправить статус без ожидания ответа
-- `check_new.py` — неблокирующая проверка новых сообщений (для периодической автопроверки)
-- `config.json` — токен + chat_id (создаётся при установке, **не коммитится**, `chmod 600`)
+- `SKILL.md` — the instructions Claude follows (what to do for each command)
+- `install.py` — sets up and validates `config.json`
+- `ask.py` — send a question, block until a reply arrives
+- `notify.py` — send a status update, no reply expected
+- `check_new.py` — non-blocking check for new messages (used by the periodic background check)
+- `config.json` — bot token + chat_id (created during setup, **never committed**, `chmod 600`)
 
-## Требования
+## Requirements
 
-- Свой Telegram-бот ([@BotFather](https://t.me/BotFather)) и свой `chat_id`
-  ([@userinfobot](https://t.me/userinfobot)) — каждый заводит свои, credentials не шарятся
-- Python 3, без внешних зависимостей (только stdlib)
-- Периодическая автопроверка использует `CronCreate`/`CronDelete` — доступность зависит от среды
-  выполнения Claude Code
+- Your own Telegram bot ([@BotFather](https://t.me/BotFather)) and your own `chat_id`
+  ([@userinfobot](https://t.me/userinfobot)) — everyone brings their own, credentials aren't shared
+- Python 3, no external dependencies (stdlib only)
+- Periodic background checking relies on `CronCreate`/`CronDelete` — availability depends on the Claude
+  Code runtime environment
 
 ## Security
 
-- `config.json` никогда не коммитить (в `.gitignore`)
-- Входящие сообщения фильтруются по `chat.id` и `from.id` — сообщения от посторонних игнорируются
-- Если токен/chat_id где-то засветились — перевыпустить через `@BotFather` → `/revoke`
+- Never commit `config.json` (it's in `.gitignore`)
+- Incoming messages are filtered by `chat.id` and `from.id` — messages from anyone else are ignored
+- If a token/chat_id ever leaks — reissue it via `@BotFather` → `/revoke`

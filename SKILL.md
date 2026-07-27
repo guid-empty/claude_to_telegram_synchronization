@@ -197,6 +197,16 @@ able to see, in the normal chat, what happened, not only in Telegram. Exit the m
 explicitly asks ("stop, I'll be back" or similar) — return to finishing turns normally, no more blocking
 calls.
 
+**NEVER disable background mode on your own initiative — not for any reason, ever.** Not after any number
+of consecutive `NOTHING_NEW` ticks, not after any length of silence, not to save tokens, not even after
+announcing "I'll turn it off if you don't reply." An announcement is not the user's consent — only an
+explicit `off` (here, or as a stop-like command caught by `check_new.py` from within Telegram itself)
+is. If long silence raises a real concern (token cost, "is this still needed") — you may say so *once*,
+but then keep ticking normally regardless of whether a reply arrives. This was gotten wrong once in
+practice: after dozens of silent ticks overnight, the mode was disabled unilaterally after a warning went
+unanswered — the warning didn't grant permission, and the user found the shutdown unexpected and unwanted.
+Silence, however long, is not a stop signal.
+
 ## Security
 
 - Never commit `config.json` (it's in this folder's `.gitignore`)

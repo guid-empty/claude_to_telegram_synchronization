@@ -1,4 +1,5 @@
 config.json
 .last_offset_*.json
+.backoff_*.json
 __pycache__/
 *.pyc

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Send a question to Telegram, block until a reply mentioning the session id
-arrives, print the reply text (session id stripped) and exit 0.
+Send a question to Telegram, block until a reply addressed to this session
+arrives, print the reply text (session marker stripped) and exit 0.
+
+A reply is addressed to this session when it contains a word starting with
+"$" followed by the session id, e.g. "$claude_communication done".
 
 Usage:
   python3 ask.py --session <session_id> --message "<question text>" [--timeout SECONDS]
@@ -19,6 +22,7 @@ in a per-session state file shared with check_new.py.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -26,6 +30,19 @@ import urllib.request
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
+
+
+def marker_re(session):
+    # A word starting with "$" whose remainder equals the session id.
+    return re.compile(r'(?<!\S)\$' + re.escape(session) + r'\b')
+
+
+def message_matches(text, session):
+    return marker_re(session).search(text) is not None
+
+
+def strip_marker(text, session):
+    return marker_re(session).sub('', text, count=1).strip()
 
 
 def state_path(session):
@@ -80,7 +97,7 @@ def main():
 
     prompt = (
         f"🤖 [{args.session}] {args.message}\n\n"
-        f"(ответь любым текстом, упомянув \"{args.session}\" где угодно в сообщении)"
+        f"(в ответе укажи ${args.session} — например в начале сообщения)"
     )
     send_message(token, chat_id, prompt)
 
@@ -109,9 +126,9 @@ def main():
             if str(msg.get("from", {}).get("id", "")) != chat_id:
                 continue
             text = msg.get("text", "")
-            if args.session in text:
+            if message_matches(text, args.session):
                 save_last_seen(args.session, last_seen)
-                cleaned = text.replace(args.session, "", 1).strip()
+                cleaned = strip_marker(text, args.session)
                 print(cleaned if cleaned else text)
                 sys.exit(0)
 

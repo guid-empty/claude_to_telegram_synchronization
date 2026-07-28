@@ -62,11 +62,14 @@ Syntax: `/claude_to_telegram on|off [session_id]` — `session_id` as a third wo
      present in the scratchpad directory path ("Scratchpad Directory" in the system prompt, of the form
      `.../claude-501/-Users-.../<UUID>/scratchpad`) — use `<UUID>` from there, don't look it up with a
      separate tool call.
-2. Tell the user (in the normal interface) the final `session_id` you'll be using.
+2. Tell the user (in the normal interface) the final `session_id` you'll be using, and that to route a
+   reply to this session they include the word `$<session_id>` in the message (e.g.
+   `$claude_communication`).
 3. Send `notify.py --session <id> --message "Background mode enabled"` — this both confirms delivery and
    gives the user a clear starting point in Telegram.
-4. Create a recurring `CronCreate` job for background polling (see "Polling while the session is idle"
-   below) — remember its job id for the later `CronDelete`.
+4. Create a recurring `CronCreate` job for background polling at the base interval (`*/2 * * * *`), which
+   then self-adjusts via progressive back-off (see "Polling while the session is idle" below) — remember
+   its job id for the later `CronDelete`.
 5. From this turn on — follow the protocol below ("Background mode protocol") at the end of every turn,
    until an explicit signal to stop arrives.
 
@@ -95,10 +98,11 @@ python3 ~/.claude/skills/claude_to_telegram/ask.py \
   --session <session_id> --message "<question>" --timeout <SECONDS>
 ```
 
-Prints the reply text (session_id stripped out) to stdout, exit 0. On timeout — `NO_RESPONSE_TIMEOUT`,
-exit 1. The user's reply needs to contain the `session_id` somewhere in the text — that's what ties it to
-this specific session (and keeps parallel Claude Code sessions replying through the same bot from getting
-crossed wires).
+Prints the reply text (the `$<session_id>` marker stripped out) to stdout, exit 0. On timeout —
+`NO_RESPONSE_TIMEOUT`, exit 1. The user's reply must contain a word starting with `$` followed by the
+session id — e.g. `$claude_communication` — that's the routing marker that ties it to this specific session
+(and keeps parallel Claude Code sessions replying through the same bot from getting crossed wires). A bare
+mention of the session id **without** the `$` is deliberately ignored.
 
 **Choosing how to call it:**
 - Quick interactive check (right now, mid-conversation) — a plain foreground Bash call, timeout in
@@ -162,25 +166,40 @@ goes quiet.
 python3 ~/.claude/skills/claude_to_telegram/check_new.py --session <session_id>
 ```
 
-Non-blocking (unlike `ask.py`) — checks `getUpdates` instantly, prints any new messages (text,
-`session_id` stripped) or `NOTHING_NEW`. Keeps a last-seen offset in
-`.last_offset_<session_id>.json` in this same folder — repeated calls are idempotent, the same message
-never gets reported twice.
+Non-blocking (unlike `ask.py`) — checks `getUpdates` instantly, prints any new messages (marker stripped)
+or `NOTHING_NEW`, and always a final line `RESCHEDULE=<minutes>` or `RESCHEDULE=none`. Keeps a last-seen
+offset in `.last_offset_<session_id>.json` — repeated calls are idempotent, the same message never gets
+reported twice.
 
-When enabling background mode — create a recurring cron job (example, every 10 minutes, offset from
-:00/:30):
+**Progressive back-off.** Every tick is a real inference call (spends tokens), so the polling interval
+should not stay short during long silence. `check_new.py` tracks a back-off level in
+`.backoff_<session_id>.json` and walks an interval ladder — **2 → 5 → 10 → 20 min** — stepping up one rung
+after every 3 consecutive `NOTHING_NEW` checks, and **resetting straight back to 2 min the moment a real
+message arrives**. The script never reschedules the cron itself (it can't); instead it tells you when to,
+via the last output line:
+- `RESCHEDULE=none` — interval unchanged, do nothing to the cron.
+- `RESCHEDULE=<M>` — the recommended interval changed; reschedule the polling cron to every `M` minutes:
+  `CronDelete` the current polling job, then `CronCreate` a new recurring one at `*/M * * * *` reusing the
+  same prompt, and remember the new job id. (If you've lost track of the current job id across ticks, use
+  `CronList` to find the claude_to_telegram polling job, then delete+recreate.)
+
+When enabling background mode — create the recurring cron job at the **base** interval:
 ```
-CronCreate(cron="7,17,27,37,47,57 * * * *", recurring=true, prompt="Check for new Telegram messages: run
-python3 ~/.claude/skills/claude_to_telegram/check_new.py --session <session_id>. If the output is
-NOTHING_NEW, do nothing and don't write anything to the user. If there's text — treat it as a new message
-from the user, explicitly say what was received, then continue.")
+CronCreate(cron="*/2 * * * *", recurring=true, prompt="Check for new Telegram messages: run
+python3 ~/.claude/skills/claude_to_telegram/check_new.py --session <session_id>. Ignore the trailing
+RESCHEDULE line unless it names a number: on RESCHEDULE=<M>, reschedule this polling cron to */M * * * *
+(CronDelete the current job, CronCreate a new recurring one at that interval reusing this same prompt,
+remember the new job id). For the rest of the output: if it is only NOTHING_NEW, do nothing and write
+nothing to the user (silent check). If there is other text, it is a message from the user via Telegram —
+explicitly say what was received, then act on it. NEVER disable background mode on your own — only on an
+explicit off from the user.")
 ```
 
 **Known limitations of CronCreate:** the job only lives in this session (not on disk — if the
 session/CLI closes, the job is gone, it has to be recreated the next time background mode is enabled);
 auto-expires after 7 days; every tick is a real inference call (spends tokens) even when the result is
-`NOTHING_NEW`. When disabling the mode (`off`) — always `CronDelete` this job, otherwise it keeps ticking
-for nothing.
+`NOTHING_NEW` (this is exactly what the progressive back-off above is for). When disabling the mode
+(`off`) — always `CronDelete` this job, otherwise it keeps ticking for nothing.
 
 ### Just notify (no reply expected)
 

@@ -25,26 +25,48 @@ You tell Claude:
 > keep working in the background, send questions to Telegram from now on
 
 Claude:
-1. Confirms in the terminal that it's switching to background mode, and sends a confirmation to Telegram:
+1. Confirms in the terminal that it's switching to background mode, and sends a confirmation to Telegram
+   telling you the **session tag** to reply with:
    ```
-   🔔 [my-session] Background mode enabled
+   🔔 [my-session] Background mode enabled — reply with $my-session
    ```
-2. Keeps working. When a decision is needed, it sends the question straight to Telegram, with the options
-   formatted right in the text:
+2. When it needs a decision, it sends the question straight to Telegram, options numbered in the text:
    ```
-   ❓ What should we call the new feature?
+   🤖 [my-session] What should we call the new feature?
 
    1. Option A — shorter
    2. Option B — more descriptive
-
-   Reply with a number or your own text.
    ```
-   You reply directly in Telegram (`2` or free text) — Claude picks up the answer and continues.
-3. If you closed the terminal and stepped away for a few hours — Claude periodically (roughly every ~10
-   minutes, as long as the session is still open) checks Telegram for new messages on its own. Message the
-   bot without ever opening the chat with Claude, and within a few minutes Claude notices and reacts.
-4. When you're done — `/claude_to_telegram off`, or just say "stop, I'll be back" — Claude returns to
+   You reply in Telegram, **starting your message with the session tag**: `$my-session 2`, or
+   `$my-session let's call it Foo`. Claude picks up the answer and continues.
+3. You can also message the bot **out of the blue** — a brand-new instruction, not a reply to anything.
+   Just prefix it with the tag: `$my-session also update the changelog`. Claude polls Telegram on a timer
+   even while idle, so it'll pick it up on its own — no need to open the terminal.
+4. **The moment Claude takes a non-trivial task into work, it acks** — so you're never left wondering
+   whether it heard you:
+   ```
+   🔔 [my-session] 📥 On it: updating the changelog…
+   ```
+   …and sends a completion notice when done. No progress spam in between.
+5. When you're done — `/claude_to_telegram off`, or just say "stop, I'll be back" — Claude returns to
    normal behavior with no more notifications.
+
+## Behavior details
+
+**Session routing with `$`.** Every reply you send must contain the session tag as a word starting with
+`$` — e.g. `$my-session`. That's how Claude knows the message is meant for *this* session. Run several
+Claude Code sessions through the same bot and each gets its own tag, so replies never cross wires. A bare
+mention of the session name **without** the `$` is ignored on purpose.
+
+**Progressive polling.** While idle, Claude checks Telegram on a timer. To avoid burning tokens on
+pointless checks during long silence, the interval backs off automatically — **2 → 5 → 10 → 20 minutes**,
+stepping up after a few empty checks — then **snaps right back to 2 minutes the instant you send
+something**. Responsive when you're active, cheap when you're away. (This needs `CronCreate`/`CronDelete`
+in the runtime; see Requirements.)
+
+**Acknowledge on pickup.** Hand Claude a task via Telegram that takes more than an instant, and it fires a
+one-line "received, on it" the moment it starts — so you know it was picked up, not ignored — then a
+completion notice at the end. Exactly one ack on pickup, no constant progress updates in between.
 
 ## Setup
 

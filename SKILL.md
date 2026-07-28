@@ -209,6 +209,14 @@ python3 ~/.claude/skills/claude_to_telegram/notify.py --session <session_id> --m
 
 ## Background mode protocol
 
+**Acknowledge on pickup.** When a task arrives via Telegram (caught by `check_new.py`) and it's going to
+take more than a trivial, instant reply — send a short `notify.py` ack **immediately, before starting the
+work**, e.g. "📥 Прочитал, взял в работу: <one line on what you're doing>". Reason: while you're heads-down
+in a long task, the user (who is away, watching Telegram) otherwise sees nothing and can't tell whether the
+task was even picked up. One ack on pickup is enough — **do not** spam progress updates while working; the
+next message they need is the completion notify when you're done. (An instant, trivial answer needs no
+pickup ack — just answer.)
+
 At the end of every turn, instead of finishing normally — call `ask.py` with a short summary of what was
 done and a "what's next" question (or just explicitly ask for the next step). Once a reply comes in,
 explicitly write in the normal interface: "got the reply: ..., proceeding as follows" — the user should be

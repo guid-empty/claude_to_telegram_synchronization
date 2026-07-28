@@ -104,7 +104,9 @@ def main():
     deadline = time.time() + args.timeout
     while time.time() < deadline:
         try:
-            result = telegram_request(token, "getUpdates", {"offset": 0, "limit": 50})
+            # limit 100 (Telegram max): with the offset never advanced, the shared queue
+            # can hold many messages; a smaller window would hide the newest ones.
+            result = telegram_request(token, "getUpdates", {"offset": 0, "limit": 100})
         except Exception:
             time.sleep(2)
             continue

@@ -27,9 +27,11 @@ Output (stdout):
     The caller reschedules the polling cron only when a number is given.
 """
 import argparse
+import glob
 import json
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 
@@ -40,6 +42,16 @@ CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
 # checks trigger one step up the ladder.
 INTERVAL_LADDER = [2, 5, 10, 20]
 EMPTY_STREAK_PER_STEP = 3
+
+# getUpdates window. We deliberately never advance the offset per-session
+# (see "Multi-session safety"), so the shared queue on Telegram's side would
+# otherwise grow without bound. With a fixed limit, once the backlog exceeds
+# it, getUpdates?offset=0 returns only the OLDEST `limit` updates and the
+# newest ones fall off the end — invisible to every session. So: query the
+# Telegram max (100), and drain the queue under pressure (below).
+GETUPDATES_LIMIT = 100
+DRAIN_WHEN_QUEUE_OVER = 80          # start draining before we near the blind spot
+ACTIVE_SESSION_WINDOW_SEC = 3600    # a session counts as "active" if its offset file changed this recently
 
 
 def offset_state_path(session):
@@ -113,6 +125,36 @@ def strip_marker(text, session):
     return marker_re(session).sub('', text, count=1).strip()
 
 
+def confirm_up_to(token, update_id):
+    """Advance the server-side offset so Telegram drops every update <= update_id.
+    Only ever call this with an update_id that EVERY active session has already seen
+    (see safe_drain_watermark) — otherwise it would erase another session's unread mail."""
+    try:
+        telegram_request(token, "getUpdates", {"offset": update_id + 1, "limit": 1, "timeout": 0})
+    except Exception:
+        pass
+
+
+def safe_drain_watermark(current_last_seen):
+    """Highest update_id that is safe to confirm/drop: the minimum last-seen offset
+    across all sessions whose offset file was touched within ACTIVE_SESSION_WINDOW_SEC.
+    Draining only up to this value never drops a message an active session hasn't read;
+    stale (likely-dead) sessions are excluded so they can't wedge the drain forever."""
+    now = time.time()
+    values = [current_last_seen]
+    for path in glob.glob(os.path.join(SCRIPT_DIR, ".last_offset_*.json")):
+        try:
+            if now - os.path.getmtime(path) > ACTIVE_SESSION_WINDOW_SEC:
+                continue
+            with open(path) as f:
+                v = int(json.load(f).get("last_update_id", 0))
+            if v > 0:
+                values.append(v)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+    return min(values) if values else 0
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--session", required=True)
@@ -127,7 +169,7 @@ def main():
     prev_interval = interval_for_level(backoff["level"])
 
     try:
-        result = telegram_request(token, "getUpdates", {"offset": 0, "limit": 50})
+        result = telegram_request(token, "getUpdates", {"offset": 0, "limit": GETUPDATES_LIMIT})
     except Exception:
         # Transient error — don't disturb back-off state or reschedule.
         print("NOTHING_NEW")
@@ -155,6 +197,15 @@ def main():
                 found.append(cleaned if cleaned else text)
 
     save_last_offset(args.session, max_update_id)
+
+    # Keep the shared queue from growing past the getUpdates window (which would hide
+    # the newest messages from every session). Drain only under pressure, and only up to
+    # what every currently-active session has already seen — never dropping unread mail.
+    queue_len = len(result.get("result", [])) if result.get("ok") else 0
+    if queue_len >= DRAIN_WHEN_QUEUE_OVER:
+        watermark = safe_drain_watermark(max_update_id)
+        if watermark > 0:
+            confirm_up_to(token, watermark)
 
     if found:
         # Real message -> reset to the shortest interval.

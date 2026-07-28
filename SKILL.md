@@ -121,14 +121,28 @@ TOKEN=$(python3 -c "import json; print(json.load(open('$HOME/.claude/skills/clau
 curl -s "https://api.telegram.org/bot${TOKEN}/getUpdates?limit=20" | python3 -m json.tool
 ```
 
-**Multi-session safety:** `ask.py` and `check_new.py` never call `getUpdates` with `offset > 0`. Telegram's
-`getUpdates` is a single-consumer API — any call with a positive offset confirms ("forgets") every prior
-update on the server, for *every* client of that bot token, not just the caller. With several parallel
-Claude Code sessions sharing one bot (common — each has its own `session_id`), a positive offset from one
-session can silently erase a message meant for another session before it's ever read, with no trace and no
-way to recover it. Both scripts track "what's already been seen" purely locally, in
-`.last_offset_<session_id>.json`, and always query with `offset=0`. If you ever add a new script that talks
-to `getUpdates`, follow the same rule — never advance the offset server-side.
+**Multi-session safety:** `ask.py` and `check_new.py` read with `getUpdates?offset=0` and track "what's
+already been seen" purely locally in `.last_offset_<session_id>.json`. Telegram's `getUpdates` is a
+single-consumer API — any call with `offset > 0` confirms ("forgets") every prior update on the server, for
+*every* client of that bot token, not just the caller. With several parallel Claude Code sessions sharing
+one bot (common — each has its own `session_id`), a naive positive offset from one session would silently
+erase a message meant for another before it's read.
+
+But `offset=0` alone has its own trap, which bit us in practice: since nobody advances the offset, the
+server-side queue **grows unbounded** (Telegram keeps updates for 24h), and `getUpdates` caps each response
+at `limit`. Once the backlog exceeds `limit`, `offset=0` returns only the *oldest* `limit` updates — the
+newest messages fall off the end and become **invisible to every session**, which all then report
+`NOTHING_NEW` forever while the user shouts into a void. Two guards fix this without reintroducing
+cross-session erasure:
+1. **`limit=100`** (Telegram's max) — the widest window available.
+2. **Bounded drain** (`check_new.py`): when the queue is near full (`>= DRAIN_WHEN_QUEUE_OVER`), advance the
+   offset up to `safe_drain_watermark` = the **minimum** `last_update_id` across sessions whose
+   `.last_offset_*.json` was touched within `ACTIVE_SESSION_WINDOW_SEC`. Because that's the min over
+   *active* sessions, everything below it has already been seen by all of them, so dropping it erases
+   nothing unread; stale (dead) sessions are excluded so they can't wedge the drain forever.
+
+If you add a new script that talks to `getUpdates`, follow the same rules — `offset=0` + `limit=100` for
+reads, and only ever advance the offset via the active-session-minimum watermark.
 
 ### Emulating AskUserQuestion (multiple-choice question)
 

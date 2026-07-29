@@ -12,8 +12,7 @@ Claude Code sessions can share **one** bot: each message carries a routing tag `
 incoming message is stored into a shared **SQLite inbox** (`messages.db`) routed to its owning session — so
 nothing is lost across parallel sessions, and messages for an offline session wait until it runs again.
 
-All scripts live in `~/.claude/skills/claude-to-telegram/`. (The old path
-`~/.claude/skills/claude_to_telegram/` is a symlink to it during the rename transition.)
+All scripts live in `~/.claude/skills/claude-to-telegram/`.
 
 ## Requirements
 

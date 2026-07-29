@@ -16,8 +16,7 @@ argument-hint: "install | on|off [session_id]"
 разложенное по сессии-владельцу — так ничего не теряется между параллельными сессиями, а сообщения для
 offline-сессии ждут, пока она снова запустится.
 
-Все скрипты — в `~/.claude/skills/claude-to-telegram/`. (Старый путь `~/.claude/skills/claude_to_telegram/`
-— симлинк на неё на время переходного периода.)
+Все скрипты — в `~/.claude/skills/claude-to-telegram/`.
 
 ## Требования
 

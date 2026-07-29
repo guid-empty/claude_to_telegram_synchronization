@@ -13,19 +13,8 @@ import argparse
 import json
 import os
 import sys
-import urllib.parse
-import urllib.request
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
-
-
-def telegram_request(token, method, params=None, http_timeout=15):
-    url = f"https://api.telegram.org/bot{token}/{method}"
-    data = urllib.parse.urlencode(params or {}).encode() if params else None
-    req = urllib.request.Request(url, data=data)
-    with urllib.request.urlopen(req, timeout=http_timeout) as resp:
-        return json.loads(resp.read().decode())
+import common
 
 
 def main():
@@ -35,7 +24,7 @@ def main():
     args = parser.parse_args()
 
     try:
-        me = telegram_request(args.token, "getMe")
+        me = common.telegram_request(args.token, "getMe")
     except Exception as e:
         print(f"FAIL: token invalid or unreachable ({e})")
         sys.exit(1)
@@ -47,9 +36,9 @@ def main():
     bot_username = me["result"].get("username", "?")
 
     try:
-        sent = telegram_request(args.token, "sendMessage", {
+        sent = common.telegram_request(args.token, "sendMessage", {
             "chat_id": args.chat_id,
-            "text": f"✅ claude_to_telegram: setup ok — this bot (@{bot_username}) can now message you.",
+            "text": f"✅ claude-to-telegram: setup ok — this bot (@{bot_username}) can now message you.",
         })
     except Exception as e:
         print(f"FAIL: token is valid (@{bot_username}) but sendMessage to chat_id={args.chat_id} failed ({e})")
@@ -59,9 +48,9 @@ def main():
         print(f"FAIL: token is valid (@{bot_username}) but sendMessage to chat_id={args.chat_id} was rejected: {sent.get('description', sent)}")
         sys.exit(1)
 
-    with open(CONFIG_PATH, "w") as f:
+    with open(common.CONFIG_PATH, "w") as f:
         json.dump({"token": args.token, "chat_id": str(args.chat_id)}, f)
-    os.chmod(CONFIG_PATH, 0o600)
+    os.chmod(common.CONFIG_PATH, 0o600)
 
     print(f"OK: bot=@{bot_username} chat_id={args.chat_id} config.json written and validated")
 

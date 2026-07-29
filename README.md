@@ -1,6 +1,6 @@
 *[🇷🇺 Russian version](README.ru.md)*
 
-# claude_to_telegram
+# claude-to-telegram
 
 A skill for [Claude Code](https://claude.com/claude-code): two-way communication with Claude via
 Telegram, for when you're away from your computer — approvals, answers to questions, status updates, and
@@ -48,15 +48,18 @@ Claude:
    🔔 [my-session] 📥 On it: updating the changelog…
    ```
    …and sends a completion notice when done. No progress spam in between.
-5. When you're done — `/claude_to_telegram off`, or just say "stop, I'll be back" — Claude returns to
+5. When you're done — `/claude-to-telegram off`, or just say "stop, I'll be back" — Claude returns to
    normal behavior with no more notifications.
 
 ## Behavior details
 
-**Session routing with `$`.** Every reply you send must contain the session tag as a word starting with
-`$` — e.g. `$my-session`. That's how Claude knows the message is meant for *this* session. Run several
-Claude Code sessions through the same bot and each gets its own tag, so replies never cross wires. A bare
-mention of the session name **without** the `$` is ignored on purpose.
+**Session routing with `$`, and a shared inbox that never loses a message.** Every reply carries the
+session tag as a word starting with `$` — e.g. `$my-session`. Under the hood, whichever session polls
+Telegram stores **every** incoming message into a shared SQLite inbox (`messages.db`), filed under the
+session its tag names, and only then advances Telegram's read cursor. So running several sessions through
+one bot is safe: each reads only its own inbox, nothing crosses wires, and a message for a session that's
+currently closed simply waits until it runs again — it's never dropped. A bare mention **without** the `$`
+is ignored on purpose.
 
 **Progressive polling.** While idle, Claude checks Telegram on a timer. To avoid burning tokens on
 pointless checks during long silence, the interval backs off automatically — **2 → 5 → 10 → 20 minutes**,
@@ -70,8 +73,8 @@ completion notice at the end. Exactly one ack on pickup, no constant progress up
 
 ## Setup
 
-1. Copy this folder to `~/.claude/skills/claude_to_telegram/`
-2. In Claude Code: `/claude_to_telegram install` — it will ask for a bot token and chat_id, validate both
+1. Copy this folder to `~/.claude/skills/claude-to-telegram/`
+2. In Claude Code: `/claude-to-telegram install` — it will ask for a bot token and chat_id, validate both
    live, and save them
 
 For how to get a bot token and chat_id, see `SKILL.md` → "Setup".
@@ -80,22 +83,25 @@ For how to get a bot token and chat_id, see `SKILL.md` → "Setup".
 
 | Command | Effect |
 |---|---|
-| `/claude_to_telegram install` | Initial setup (bot token + chat_id) |
-| `/claude_to_telegram on [session_id]` | Enable background mode |
-| `/claude_to_telegram off [session_id]` | Disable background mode |
-| `/claude_to_telegram` | Show what's available without changing state |
+| `/claude-to-telegram install` | Initial setup (bot token + chat_id) |
+| `/claude-to-telegram on [session_id]` | Enable background mode |
+| `/claude-to-telegram off [session_id]` | Disable background mode |
+| `/claude-to-telegram` | Show what's available without changing state |
 
 Full documentation (protocol, limitations, internals) lives in [`SKILL.md`](SKILL.md) — the same file
 Claude reads when the skill is invoked. A Russian reference copy is at [`SKILL.ru.md`](SKILL.ru.md).
 
 ## Files
 
-- `SKILL.md` — the instructions Claude follows (what to do for each command)
-- `install.py` — sets up and validates `config.json`
-- `ask.py` — send a question, block until a reply arrives
+- `SKILL.md` / `SKILL.ru.md` — the instructions Claude follows (English is the working copy)
+- `common.py` — config, Telegram calls, `$tag` parsing
+- `db.py` — the shared SQLite inbox (schema, store, deliver, prune)
+- `ingest.py` — pull from Telegram → route by tag → store → advance the cursor safely
+- `check_new.py` — one background poll: ingest, then deliver this session's inbox
+- `ask.py` — send a question, block until this session's reply arrives
 - `notify.py` — send a status update, no reply expected
-- `check_new.py` — non-blocking check for new messages (used by the periodic background check)
-- `config.json` — bot token + chat_id (created during setup, **never committed**, `chmod 600`)
+- `install.py` — sets up and validates `config.json`
+- `config.json`, `messages.db` — created at runtime, **never committed** (`config.json` is `chmod 600`)
 
 ## Requirements
 
@@ -107,6 +113,6 @@ Claude reads when the skill is invoked. A Russian reference copy is at [`SKILL.r
 
 ## Security
 
-- Never commit `config.json` (it's in `.gitignore`)
+- Never commit `config.json` or `messages.db` (both gitignored)
 - Incoming messages are filtered by `chat.id` and `from.id` — messages from anyone else are ignored
 - If a token/chat_id ever leaks — reissue it via `@BotFather` → `/revoke`

@@ -1,257 +1,183 @@
 ---
-name: claude_to_telegram
-description: Two-way communication with the user via a Telegram bot, when they explicitly ask to work in the background/remotely — not Claude Code hooks, a direct Bash call to ask.py/notify.py. Trigger when the user says "work in the background", "send questions/status to Telegram", "let's talk through the bot from now on", gives a session_id to use, explicitly invokes /claude_to_telegram, or /claude_to_telegram on|off. Do NOT apply as a standing behavior — only on explicit request, for one specific session.
+name: claude-to-telegram
+description: Two-way communication with the user via a Telegram bot, when they explicitly ask to work in the background/remotely — no Claude Code hooks, no daemon; Claude runs small Python scripts and messages route through a shared SQLite inbox. Trigger when the user says "work in the background", "send questions/status to Telegram", "let's talk through the bot from now on", gives a session_id to use, explicitly invokes /claude-to-telegram, or /claude-to-telegram on|off. Do NOT apply as a standing behavior — only on explicit request, for one specific session.
 argument-hint: "install | on|off [session_id]"
 ---
 
-# claude_to_telegram — talking to the user over Telegram instead of the normal interface
+# claude-to-telegram — talk to the user over Telegram instead of the terminal
 
-A minimal two-way communication service with the user over Telegram — no Claude Code hooks at all
-(`PermissionRequest`/`AskUserQuestion`). Claude explicitly calls a plain Bash tool, which sends a message
-and (optionally) blocks waiting for a reply via `getUpdates`. No persistent daemon required — each
-invocation runs its own long-poll for the duration of the call and then exits.
+Two-way comms with the user over Telegram, for background/remote work — no Claude Code hooks, no persistent
+daemon. Claude explicitly runs small Python scripts (stdlib only; `sqlite3` is built in). Several parallel
+Claude Code sessions can share **one** bot: each message carries a routing tag `$<session_id>`, and every
+incoming message is stored into a shared **SQLite inbox** (`messages.db`) routed to its owning session — so
+nothing is lost across parallel sessions, and messages for an offline session wait until it runs again.
+
+All scripts live in `~/.claude/skills/claude-to-telegram/`. (The old path
+`~/.claude/skills/claude_to_telegram/` is a symlink to it during the rename transition.)
 
 ## Requirements
 
-- Your own Telegram bot (via [@BotFather](https://t.me/BotFather)) and your own `chat_id`
-  (via [@userinfobot](https://t.me/userinfobot)) — credentials aren't shared, everyone sets up their own
-- `config.json` in this same folder: `{"token": "...", "chat_id": "..."}`, `chmod 600`, never commit —
-  see "Setup" below, populated automatically
-- Periodic background checking (see below) needs access to `CronCreate`/`CronDelete`; availability depends
-  on the Claude Code runtime environment
+- Your own Telegram bot ([@BotFather](https://t.me/BotFather)) and your own `chat_id`
+  ([@userinfobot](https://t.me/userinfobot)) — credentials aren't shared, everyone sets up their own.
+- `config.json` in this folder: `{"token": "...", "chat_id": "..."}`, `chmod 600`, never commit — filled by
+  "Install" below.
+- Python 3 (stdlib only). Background polling needs `CronCreate`/`CronDelete` in the runtime.
 
-## Setup
+## Files
 
-`/claude_to_telegram install` — initial `config.json` setup.
+- `common.py` — config load, Telegram calls, `$tag` parsing/stripping
+- `db.py` — the shared SQLite inbox (schema, store, inbox, mark, prune; WAL mode)
+- `ingest.py` — pull from Telegram → route each message by its `$tag` → store → advance the offset **only up
+  to what was stored** → prune >7 days
+- `check_new.py` — one background poll for a session: ingest, then deliver this session's own inbox
+- `ask.py` — send a question, block until this session's reply arrives (via the inbox)
+- `notify.py` — fire-and-forget status message
+- `install.py` — write + validate `config.json`
+- `config.json`, `messages.db`, `.backoff_*.json` — local only, gitignored
 
-1. If `config.json` already exists — report which `chat_id` it's configured for (never show the token
-   itself), ask whether to actually reconfigure. If yes, continue; otherwise stop.
-2. If not — briefly explain how to get both values: a token from
-   [@BotFather](https://t.me/BotFather) (`/newbot`), a `chat_id` from
-   [@userinfobot](https://t.me/userinfobot). Ask the user to send both values as text **right here, in the
-   normal interface** — at this stage there's no working bot yet, so waiting for a reply via Telegram
-   (`ask.py`) makes no sense.
-3. Once both values are received:
+## Install
+
+`/claude-to-telegram install` — first-time `config.json` setup.
+
+1. If `config.json` exists — report its `chat_id` (never the token), ask whether to reconfigure; stop if no.
+2. Else explain how to get both values: token from [@BotFather](https://t.me/BotFather) (`/newbot`),
+   `chat_id` from [@userinfobot](https://t.me/userinfobot). Ask the user to paste both **here, in the normal
+   interface** (no bot exists yet, so waiting via Telegram makes no sense).
+3. Run:
    ```bash
-   python3 ~/.claude/skills/claude_to_telegram/install.py --token "<TOKEN>" --chat-id "<CHAT_ID>"
+   python3 ~/.claude/skills/claude-to-telegram/install.py --token "<TOKEN>" --chat-id "<CHAT_ID>"
    ```
-   The script validates the token via `getMe`, sends a test message to `chat_id` (confirming the bot can
-   actually message this user), and only on success writes `config.json` (`chmod 600`). It never prints
-   the token back out.
-4. On `FAIL` — report the exact reason from the script's output (invalid token / bot can't message that
-   `chat_id`) and ask the user to double-check the values, rather than guessing what went wrong.
-5. On `OK` — report the bot's username now configured, and that it's ready for `on`.
+   It validates the token (`getMe`), sends a test message to `chat_id`, and only on success writes
+   `config.json` (`chmod 600`). It never prints the token back.
+4. On `FAIL` — relay the exact reason from the output; ask the user to recheck. On `OK` — report the bot
+   username and that it's ready for `on`.
 
 ## When to enable
 
-Only on an explicit, one-off request from the user — never as a default or standing behavior. Enabled
-either via an explicit command, `/claude_to_telegram on` / `/claude_to_telegram off` (see "Arguments"
-below), or a natural phrase: "work in the background, questions go to Telegram", "let's talk through the
-bot from now on", "here's a session id — let's switch to talking over Telegram with it".
+Only on an explicit, one-off request — never a standing default. Triggered by `/claude-to-telegram on|off`,
+or a natural phrase ("work in the background, questions to Telegram", "let's talk through the bot").
 
 ## Arguments
 
-Syntax: `/claude_to_telegram on|off [session_id]` — `session_id` as a third word is optional.
+Syntax: `/claude-to-telegram on|off [session_id]` — `session_id` optional third word.
 
-`/claude_to_telegram on [session_id]`:
-1. Determine the `session_id`:
-   - if given explicitly (as a command argument, or named by the user earlier in this conversation) — use
-     it;
-   - otherwise — generate one automatically: `<project-name>-<first 8 chars of the session UUID>`. Project
-     name is the last component of `cwd`. The session UUID comes from your own system prompt — it's
-     present in the scratchpad directory path ("Scratchpad Directory" in the system prompt, of the form
-     `.../claude-501/-Users-.../<UUID>/scratchpad`) — use `<UUID>` from there, don't look it up with a
-     separate tool call.
-2. Tell the user (in the normal interface) the final `session_id` you'll be using, and that to route a
-   reply to this session they include the word `$<session_id>` in the message (e.g.
-   `$claude_communication`).
-3. Send `notify.py --session <id> --message "Background mode enabled"` — this both confirms delivery and
-   gives the user a clear starting point in Telegram.
-4. Create a recurring `CronCreate` job for background polling at the base interval (`*/2 * * * *`), which
-   then self-adjusts via progressive back-off (see "Polling while the session is idle" below) — remember
-   its job id for the later `CronDelete`.
-5. From this turn on — follow the protocol below ("Background mode protocol") at the end of every turn,
-   until an explicit signal to stop arrives.
+`/claude-to-telegram on [session_id]`:
+1. Determine `session_id`: use the one given (command arg, or named earlier in the conversation); else
+   generate `<project-name>-<first 8 chars of the session UUID>` (project = last component of `cwd`; UUID
+   from the "Scratchpad Directory" path in your system prompt, not a separate tool call).
+2. Tell the user (in the normal interface) the final `session_id`, and that to reach this session they
+   prefix a Telegram message with `$<session_id>` (e.g. `$my-session do X`).
+3. `notify.py --session <id> --message "Background mode enabled"`.
+4. Create a recurring `CronCreate` job at the base interval (`*/2 * * * *`) that self-adjusts via
+   back-off (see "Polling" below) — remember its job id for the later `CronDelete`.
+5. Follow the "Background mode protocol" at the end of every turn until an explicit off.
 
-`/claude_to_telegram off [session_id]`:
-1. If background mode was enabled in this conversation — send
-   `notify.py --session <id> --message "Background mode disabled"`.
-2. `CronDelete` the job created in the `on` step — otherwise it keeps ticking for nothing.
-3. Return to normal turn completion, no more blocking `ask.py` calls.
+`/claude-to-telegram off [session_id]`:
+1. If enabled this conversation — `notify.py --session <id> --message "Background mode disabled"`.
+2. `CronDelete` the polling job (use `CronList` if you lost the id).
+3. Back to normal turn completion.
 
-`/claude_to_telegram` with no arguments — just load this instruction into context (explain/use it as
-appropriate), don't change the session's current state.
+`/claude-to-telegram` with no args — just load this instruction into context; don't change session state.
 
-**An `off` command sent from within Telegram itself** (caught by `check_new.py` on a cron tick, text
-contains "off" or clearly reads as a stop command) — handle it the same way as an explicit
-`/claude_to_telegram off` here: run steps 1-3 above, not as an ordinary message to act on and keep working.
+**An `off`-like command sent from within Telegram** (caught by `check_new.py`, text reads as a stop) —
+handle it the same as an explicit `off` here.
 
-## How to run it
+## How it works — ingest, then deliver
 
-Both scripts live directly in this skill's folder (`~/.claude/skills/claude_to_telegram/`), the config
-(`config.json`, token + chat_id) is right there too, `chmod 600`, never committed anywhere.
+Every poll does two phases:
 
-### Ask a question and wait for a reply
+1. **Ingest (any session drains Telegram for everyone)** — `ingest.py`:
+   `getUpdates(offset=0, limit=100)` → for each message find its `$tag` → `INSERT OR IGNORE` into
+   `messages.db` (owner = the tag, or `unrouted` if none) → advance the offset **only up to the max
+   `update_id` actually stored this batch** → prune rows older than 7 days.
+2. **Deliver (this session handles its own inbox)** — `SELECT ... WHERE session_id=<me> AND
+   status='not_processed' ORDER BY update_id`, print each (tag stripped), mark `read`.
+
+Why it's lossless and ordered (the invariants — keep them if you touch this code):
+- `getUpdates` returns updates in strictly ascending, gap-free `update_id` order. We store the whole batch,
+  then confirm the offset only up to that batch's max — so we never skip past an unstored message; a batch
+  beyond `limit` just arrives next call.
+- **Durability before confirm**: a message is in SQLite before its `update_id` is confirmed/dropped on
+  Telegram. A crash in between merely re-fetches it.
+- Idempotent (`update_id` PRIMARY KEY): parallel sessions ingesting the same updates, or a re-fetch, never
+  duplicate.
+- A message for a session whose poller is dead simply waits as `not_processed` until that session runs
+  again — closing/crashing a session loses nothing.
+
+## Multi-session safety (why the SQLite inbox exists)
+
+`getUpdates` is a **single-consumer** API: the offset is global per bot token, and confirming it drops
+updates for *every* reader. With several sessions polling one bot, naive per-session offsets erase each
+other's mail; and if nobody advances the offset, the queue grows until the newest messages fall outside the
+`limit` window and go invisible to all (this actually happened). The SQLite inbox resolves both: whoever
+polls **stores every message durably (routed by tag) before advancing the offset**, so the offset *can* be
+advanced safely (queue stays drained) and no reader loses another's mail. If you add a script that calls
+`getUpdates`, go through `ingest.py` — never advance the offset past what's been stored.
+
+## Polling while the session is idle (CronCreate) + progressive back-off
+
+Cron "fires while the REPL is idle" — the only way to wake an idle session. `check_new.py` also drives a
+back-off ladder (**2 → 5 → 10 → 20 min**): +1 rung after 3 consecutive empty checks, reset to 2 min the
+instant a message arrives. It can't reschedule the cron itself, so it prints a final line:
+
+- `RESCHEDULE=none` — interval unchanged, do nothing.
+- `RESCHEDULE=<M>` — reschedule the polling cron to `*/M * * * *`: `CronDelete` the current job, `CronCreate`
+  a new recurring one reusing the same prompt, remember the new id (`CronList` if you lost it).
+
+Enable at the base interval:
+```
+CronCreate(cron="*/2 * * * *", recurring=true, prompt="Проверь новые сообщения в Telegram: запусти
+python3 ~/.claude/skills/claude-to-telegram/check_new.py --session <session_id>. На финальной строке
+RESCHEDULE=<M> перепланируй этот polling-cron на */M (CronDelete текущий, CronCreate новый с тем же prompt,
+запомни id); RESCHEDULE=none — ничего. Если вывод только NOTHING_NEW — молчи. Если есть другой текст — это
+сообщение от пользователя: явно напиши 'Получено из Telegram: ...' и выполняй. НИКОГДА не выключай фоновый
+режим сам — только по явному off.")
+```
+
+**CronCreate limits:** the job is session-only (gone when the CLI/session closes → re-create on next `on`),
+auto-expires after 7 days, and every tick is a real inference call (hence the back-off). On `off`, always
+`CronDelete` it.
+
+## Ask a question and wait for a reply
 
 ```bash
-python3 ~/.claude/skills/claude_to_telegram/ask.py \
-  --session <session_id> --message "<question>" --timeout <SECONDS>
+python3 ~/.claude/skills/claude-to-telegram/ask.py --session <session_id> --message "<question>" --timeout <SECONDS>
 ```
+Sends the question, then polls the inbox until a reply tagged `$<session_id>` arrives; prints it (tag
+stripped), exit 0; on timeout prints `NO_RESPONSE_TIMEOUT`, exit 1. Foreground with a minutes timeout for a
+quick interactive ask; `run_in_background: true` with a long timeout for "I'll answer later". Note: don't
+lean on `ask.py` while a background cron polls the same session — both read the same inbox and either may
+deliver the reply; in background mode prefer `notify.py` + the cron.
 
-Prints the reply text (the `$<session_id>` marker stripped out) to stdout, exit 0. On timeout —
-`NO_RESPONSE_TIMEOUT`, exit 1. The user's reply must contain a word starting with `$` followed by the
-session id — e.g. `$claude_communication` — that's the routing marker that ties it to this specific session
-(and keeps parallel Claude Code sessions replying through the same bot from getting crossed wires). A bare
-mention of the session id **without** the `$` is deliberately ignored.
+### Emulating AskUserQuestion (options)
+Format numbered options directly in the `--message` text ("1. A\n2. B\n\nReply with a number or text"). The
+reply is plain text; interpret a bare number as that choice, else free-form (the "Other" equivalent).
 
-**Choosing how to call it:**
-- Quick interactive check (right now, mid-conversation) — a plain foreground Bash call, timeout in
-  minutes.
-- The real "I'm stepping away, I'll reply when I can" case — `run_in_background: true` with a large
-  `--timeout` (hours) — don't block the current turn, wait for the background-task notification, then
-  process the result and explicitly tell the user, in the normal interface, what was received and how
-  you're proceeding.
-
-**Known limitation:** short synchronous windows are unreliable if the person replies later than expected —
-the message isn't lost (it stays queued in Telegram), it's just that the active `getUpdates` poll has
-already stopped listening. If a window expires with no reply, don't treat that as a failure right away —
-check manually whether something actually came in:
-```bash
-TOKEN=$(python3 -c "import json; print(json.load(open('$HOME/.claude/skills/claude_to_telegram/config.json'))['token'])")
-curl -s "https://api.telegram.org/bot${TOKEN}/getUpdates?limit=20" | python3 -m json.tool
-```
-
-**Multi-session safety:** `ask.py` and `check_new.py` read with `getUpdates?offset=0` and track "what's
-already been seen" purely locally in `.last_offset_<session_id>.json`. Telegram's `getUpdates` is a
-single-consumer API — any call with `offset > 0` confirms ("forgets") every prior update on the server, for
-*every* client of that bot token, not just the caller. With several parallel Claude Code sessions sharing
-one bot (common — each has its own `session_id`), a naive positive offset from one session would silently
-erase a message meant for another before it's read.
-
-But `offset=0` alone has its own trap, which bit us in practice: since nobody advances the offset, the
-server-side queue **grows unbounded** (Telegram keeps updates for 24h), and `getUpdates` caps each response
-at `limit`. Once the backlog exceeds `limit`, `offset=0` returns only the *oldest* `limit` updates — the
-newest messages fall off the end and become **invisible to every session**, which all then report
-`NOTHING_NEW` forever while the user shouts into a void. Two guards fix this without reintroducing
-cross-session erasure:
-1. **`limit=100`** (Telegram's max) — the widest window available.
-2. **Bounded drain** (`check_new.py`): when the queue is near full (`>= DRAIN_WHEN_QUEUE_OVER`), advance the
-   offset up to `safe_drain_watermark` = the **minimum** `last_update_id` across sessions whose
-   `.last_offset_*.json` was touched within `ACTIVE_SESSION_WINDOW_SEC`. Because that's the min over
-   *active* sessions, everything below it has already been seen by all of them, so dropping it erases
-   nothing unread; stale (dead) sessions are excluded so they can't wedge the drain forever.
-
-If you add a new script that talks to `getUpdates`, follow the same rules — `offset=0` + `limit=100` for
-reads, and only ever advance the offset via the active-session-minimum watermark.
-
-### Emulating AskUserQuestion (multiple-choice question)
-
-The native `AskUserQuestion` (with buttons) isn't reachable from Telegram in background mode — hooks are
-intentionally not used (see above). If you need a multiple-choice question rather than free text — format
-the options directly in the `--message` text, numbered:
-
-```
-<question>
-
-1. <option A> — <short description if useful>
-2. <option B> — <short description>
-3. <option C> — <short description>
-
-Reply with a number or your own text.
-```
-
-The reply from `ask.py` is plain text (a number like "2", or free text). Interpreting "this is a choice of
-option N" vs. "this is a free-form answer" happens on the model's side after getting the result, not in
-the script itself: if the reply is a short number matching one of the options, treat it as that choice;
-otherwise treat it as a free-form answer (the equivalent of "Other" in the native `AskUserQuestion`).
-
-### Polling while the session is idle (CronCreate)
-
-**A fundamental architectural limitation:** neither `ask.py` nor any hook can "wake up" a session that has
-already finished its turn and is waiting for the user's next message in the normal interface — a message
-sent to Telegram while nobody's listening just sits unread in the queue. This is inherent: hooks intercept
-an interaction that's already in progress, they don't initiate a new one.
-
-The only working approach found so far is `CronCreate` (a session-only scheduler, separate from hooks): a
-job "fires while the REPL is idle", meaning it can genuinely enqueue a new prompt at the moment the session
-goes quiet.
-
-```
-python3 ~/.claude/skills/claude_to_telegram/check_new.py --session <session_id>
-```
-
-Non-blocking (unlike `ask.py`) — checks `getUpdates` instantly, prints any new messages (marker stripped)
-or `NOTHING_NEW`, and always a final line `RESCHEDULE=<minutes>` or `RESCHEDULE=none`. Keeps a last-seen
-offset in `.last_offset_<session_id>.json` — repeated calls are idempotent, the same message never gets
-reported twice.
-
-**Progressive back-off.** Every tick is a real inference call (spends tokens), so the polling interval
-should not stay short during long silence. `check_new.py` tracks a back-off level in
-`.backoff_<session_id>.json` and walks an interval ladder — **2 → 5 → 10 → 20 min** — stepping up one rung
-after every 3 consecutive `NOTHING_NEW` checks, and **resetting straight back to 2 min the moment a real
-message arrives**. The script never reschedules the cron itself (it can't); instead it tells you when to,
-via the last output line:
-- `RESCHEDULE=none` — interval unchanged, do nothing to the cron.
-- `RESCHEDULE=<M>` — the recommended interval changed; reschedule the polling cron to every `M` minutes:
-  `CronDelete` the current polling job, then `CronCreate` a new recurring one at `*/M * * * *` reusing the
-  same prompt, and remember the new job id. (If you've lost track of the current job id across ticks, use
-  `CronList` to find the claude_to_telegram polling job, then delete+recreate.)
-
-When enabling background mode — create the recurring cron job at the **base** interval:
-```
-CronCreate(cron="*/2 * * * *", recurring=true, prompt="Check for new Telegram messages: run
-python3 ~/.claude/skills/claude_to_telegram/check_new.py --session <session_id>. Ignore the trailing
-RESCHEDULE line unless it names a number: on RESCHEDULE=<M>, reschedule this polling cron to */M * * * *
-(CronDelete the current job, CronCreate a new recurring one at that interval reusing this same prompt,
-remember the new job id). For the rest of the output: if it is only NOTHING_NEW, do nothing and write
-nothing to the user (silent check). If there is other text, it is a message from the user via Telegram —
-explicitly say what was received, then act on it. NEVER disable background mode on your own — only on an
-explicit off from the user.")
-```
-
-**Known limitations of CronCreate:** the job only lives in this session (not on disk — if the
-session/CLI closes, the job is gone, it has to be recreated the next time background mode is enabled);
-auto-expires after 7 days; every tick is a real inference call (spends tokens) even when the result is
-`NOTHING_NEW` (this is exactly what the progressive back-off above is for). When disabling the mode
-(`off`) — always `CronDelete` this job, otherwise it keeps ticking for nothing.
-
-### Just notify (no reply expected)
+## Just notify (no reply expected)
 
 ```bash
-python3 ~/.claude/skills/claude_to_telegram/notify.py --session <session_id> --message "<status>"
+python3 ~/.claude/skills/claude-to-telegram/notify.py --session <session_id> --message "<status>"
 ```
 
 ## Background mode protocol
 
-**Acknowledge on pickup.** When a task arrives via Telegram (caught by `check_new.py`) and it's going to
-take more than a trivial, instant reply — send a short `notify.py` ack **immediately, before starting the
-work**, e.g. "📥 Прочитал, взял в работу: <one line on what you're doing>". Reason: while you're heads-down
-in a long task, the user (who is away, watching Telegram) otherwise sees nothing and can't tell whether the
-task was even picked up. One ack on pickup is enough — **do not** spam progress updates while working; the
-next message they need is the completion notify when you're done. (An instant, trivial answer needs no
-pickup ack — just answer.)
+**Acknowledge on pickup.** When a task arrives via Telegram and will take more than an instant, send a short
+`notify.py` ack **before starting** ("📥 Прочитал, взял в работу: <one line>") so the away user knows it was
+picked up. One ack only — no progress spam; a completion notify follows when done. (Instant trivial answers
+need no ack.)
 
-At the end of every turn, instead of finishing normally — call `ask.py` with a short summary of what was
-done and a "what's next" question (or just explicitly ask for the next step). Once a reply comes in,
-explicitly write in the normal interface: "got the reply: ..., proceeding as follows" — the user should be
-able to see, in the normal chat, what happened, not only in Telegram. Exit the mode as soon as the user
-explicitly asks ("stop, I'll be back" or similar) — return to finishing turns normally, no more blocking
-calls.
+At the end of each turn, deliver a short summary + "what's next" (via `ask.py` to block for a reply, or just
+end and let the cron catch the next message). When you get a reply, say in the normal interface what was
+received and how you're proceeding. Exit the mode only on an explicit stop from the user.
 
-**NEVER disable background mode on your own initiative — not for any reason, ever.** Not after any number
-of consecutive `NOTHING_NEW` ticks, not after any length of silence, not to save tokens, not even after
-announcing "I'll turn it off if you don't reply." An announcement is not the user's consent — only an
-explicit `off` (here, or as a stop-like command caught by `check_new.py` from within Telegram itself)
-is. If long silence raises a real concern (token cost, "is this still needed") — you may say so *once*,
-but then keep ticking normally regardless of whether a reply arrives. This was gotten wrong once in
-practice: after dozens of silent ticks overnight, the mode was disabled unilaterally after a warning went
-unanswered — the warning didn't grant permission, and the user found the shutdown unexpected and unwanted.
+**NEVER disable background mode on your own initiative — not for any reason, ever.** Not after any number of
+`NOTHING_NEW` ticks, not after any silence, not to save tokens, not even after warning you'd turn it off. An
+announcement is not consent — only an explicit `off` (here, or a stop-like command from Telegram) is.
 Silence, however long, is not a stop signal.
 
 ## Security
 
-- Never commit `config.json` (it's in this folder's `.gitignore`)
-- Incoming messages are filtered by `chat.id` **and** `from.id` matching the configured `chat_id`;
-  messages from anyone else are ignored
-- If the token/chat_id ever leak in plain sight — reissue the token via `@BotFather` → `/revoke`, then
-  only update `config.json`
+- Never commit `config.json` or `messages.db` (both gitignored).
+- Incoming messages are filtered by `chat.id` **and** `from.id` matching the configured `chat_id`; anyone
+  else is ignored.
+- If token/chat_id leak — reissue the token via `@BotFather` → `/revoke`, update only `config.json`.

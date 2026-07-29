@@ -1,5 +1,7 @@
 config.json
-.last_offset_*.json
 .backoff_*.json
+messages.db
+messages.db-wal
+messages.db-shm
 __pycache__/
 *.pyc

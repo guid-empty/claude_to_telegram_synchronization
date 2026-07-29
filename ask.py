@@ -1,85 +1,25 @@
 #!/usr/bin/env python3
 """
 Send a question to Telegram, block until a reply addressed to this session
-arrives, print the reply text (session marker stripped) and exit 0.
-
-A reply is addressed to this session when it contains a word starting with
-"$" followed by the session id, e.g. "$claude_communication done".
+arrives (via the shared SQLite inbox), print the reply text and exit 0.
 
 Usage:
   python3 ask.py --session <session_id> --message "<question text>" [--timeout SECONDS]
 
 On timeout: prints "NO_RESPONSE_TIMEOUT" and exits 1.
 
-IMPORTANT: never call getUpdates with an offset greater than 0. Telegram's
-getUpdates is a single-consumer API — any call with offset > 0 confirms
-(server-side "forgets") every prior update for ALL clients of this bot
-token, not just this process. With multiple parallel Claude Code sessions
-sharing one bot, that would silently drop messages meant for other
-sessions. "What have we already seen" is tracked purely locally instead,
-in a per-session state file shared with check_new.py.
+The reply must carry this session's routing tag — a word "$<session_id>" (e.g.
+"$my-session ok"). Note: if a background polling cron is running for the same
+session, it and this loop both read the same inbox; prefer this only for
+foreground/interactive asks, or accept that either may deliver the reply.
 """
 import argparse
-import json
-import os
-import re
 import sys
 import time
-import urllib.parse
-import urllib.request
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
-
-
-def marker_re(session):
-    # A word starting with "$" whose remainder equals the session id.
-    return re.compile(r'(?<!\S)\$' + re.escape(session) + r'\b')
-
-
-def message_matches(text, session):
-    return marker_re(session).search(text) is not None
-
-
-def strip_marker(text, session):
-    return marker_re(session).sub('', text, count=1).strip()
-
-
-def state_path(session):
-    return os.path.join(SCRIPT_DIR, f".last_offset_{session}.json")
-
-
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
-
-
-def telegram_request(token, method, params=None, http_timeout=20):
-    url = f"https://api.telegram.org/bot{token}/{method}"
-    data = urllib.parse.urlencode(params or {}).encode()
-    req = urllib.request.Request(url, data=data)
-    with urllib.request.urlopen(req, timeout=http_timeout) as resp:
-        return json.loads(resp.read().decode())
-
-
-def send_message(token, chat_id, text):
-    telegram_request(token, "sendMessage", {"chat_id": chat_id, "text": text})
-
-
-def load_last_seen(session):
-    path = state_path(session)
-    if not os.path.exists(path):
-        return 0
-    try:
-        with open(path) as f:
-            return json.load(f).get("last_update_id", 0)
-    except (json.JSONDecodeError, IOError):
-        return 0
-
-
-def save_last_seen(session, update_id):
-    with open(state_path(session), "w") as f:
-        json.dump({"last_update_id": update_id}, f)
+import common
+import db
+from ingest import ingest
 
 
 def main():
@@ -89,54 +29,37 @@ def main():
     parser.add_argument("--timeout", type=int, default=3600)
     args = parser.parse_args()
 
-    config = load_config()
+    config = common.load_config()
     token = config["token"]
     chat_id = str(config["chat_id"])
 
-    last_seen = load_last_seen(args.session)
+    conn = db.get_conn()
+    db.init(conn)
 
-    prompt = (
-        f"🤖 [{args.session}] {args.message}\n\n"
-        f"(в ответе укажи ${args.session} — например в начале сообщения)"
+    # Ignore anything already waiting from before the question was asked.
+    for update_id, _ in db.inbox(conn, args.session):
+        db.mark(conn, update_id, "read")
+    conn.commit()
+
+    common.send_message(
+        token, chat_id,
+        f"🤖 [{args.session}] {args.message}\n\n(в ответе укажи ${args.session} — например в начале сообщения)",
     )
-    send_message(token, chat_id, prompt)
 
     deadline = time.time() + args.timeout
     while time.time() < deadline:
-        try:
-            # limit 100 (Telegram max): with the offset never advanced, the shared queue
-            # can hold many messages; a smaller window would hide the newest ones.
-            result = telegram_request(token, "getUpdates", {"offset": 0, "limit": 100})
-        except Exception:
-            time.sleep(2)
-            continue
-
-        if not result.get("ok"):
-            time.sleep(2)
-            continue
-
-        for update in result.get("result", []):
-            uid = update["update_id"]
-            if uid <= last_seen:
-                continue
-            last_seen = max(last_seen, uid)
-            msg = update.get("message")
-            if not msg:
-                continue
-            if str(msg.get("chat", {}).get("id", "")) != chat_id:
-                continue
-            if str(msg.get("from", {}).get("id", "")) != chat_id:
-                continue
-            text = msg.get("text", "")
-            if message_matches(text, args.session):
-                save_last_seen(args.session, last_seen)
-                cleaned = strip_marker(text, args.session)
-                print(cleaned if cleaned else text)
-                sys.exit(0)
-
-        save_last_seen(args.session, last_seen)
+        ingest(conn, token, chat_id)
+        rows = db.inbox(conn, args.session)
+        if rows:
+            update_id, text = rows[0]
+            db.mark(conn, update_id, "read")
+            conn.commit()
+            conn.close()
+            print(text)
+            sys.exit(0)
         time.sleep(2)
 
+    conn.close()
     print("NO_RESPONSE_TIMEOUT")
     sys.exit(1)
 

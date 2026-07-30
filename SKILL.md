@@ -160,6 +160,14 @@ python3 ~/.claude/skills/claude-to-telegram/notify.py --session <session_id> --m
 
 ## Background mode protocol
 
+**NEVER call the native `AskUserQuestion` tool while background mode is active.** It is a *blocking* tool —
+it suspends the turn waiting for a click in the terminal UI, so the REPL is no longer idle, so the polling
+cron cannot fire. The result: polling silently stalls, the user's Telegram messages pile up unanswered for
+as long as the block lasts, and it looks like you hung. (Happened in practice: an `AskUserQuestion` blocked
+the session for hours while the user kept messaging.) If you need the user to choose something, **ask in
+Telegram** — send the numbered options via `notify.py`/`ask.py` (see "Emulating AskUserQuestion") and read
+the reply from the inbox. Never the native tool, not even for a "quick" confirm.
+
 **Acknowledge on pickup.** When a task arrives via Telegram and will take more than an instant, send a short
 `notify.py` ack **before starting** ("📥 Прочитал, взял в работу: <one line>") so the away user knows it was
 picked up. One ack only — no progress spam; a completion notify follows when done. (Instant trivial answers

@@ -147,12 +147,12 @@ hours while messages accumulate unread. If you need the user to choose something
 Telegram** — send the numbered options via `notify.py`/`ask.py` (see "Emulating AskUserQuestion") and read
 the reply from the inbox. Never the native tool, not even for a "quick" confirm.
 
-**ALWAYS bound long-lived background commands with a `timeout` — and never trust "the notification will
-come."** A `Bash` call with `run_in_background: true` has NO built-in timeout (unlike a synchronous call,
+**ALWAYS bound background commands with a `timeout` — and never trust "the notification will come."** A `Bash` call with `run_in_background: true` has NO built-in timeout (unlike a synchronous call,
 which defaults to ~120s). If such a command hangs, it hangs *forever* and never notifies — so if you're
 passively waiting on its completion event, you stall indefinitely and it looks exactly like the
-`AskUserQuestion` freeze above. Rules: (1) wrap any long/uncertain background command in a shell `timeout N`
-(e.g. `timeout 600 chrome --headless … --screenshot …`) so it self-kills; (2) never conclude a turn "waiting"
+`AskUserQuestion` freeze above. Rules: (1) wrap the command in a shell `timeout N`
+(e.g. `timeout 600 chrome --headless … --screenshot …`) so it self-kills — see the unconditional list below;
+(2) never conclude a turn "waiting"
 on a single background task as your only continuation — poll its status actively (or set a fallback) and
 `pkill`/`kill` the hung process instead of waiting; (3) headless-Chrome screenshots of Flutter-web pages that
 init Firebase/network **hang** under `--virtual-time-budget` (virtual time never drains while Firebase waits
@@ -171,6 +171,21 @@ tick.
 Note that a *local* page is no safer than a remote one: if the dev server serving it has already exited, the
 request never resolves, `--virtual-time-budget` never drains, and the flag you added as an escape hatch
 guarantees the hang instead of bounding it. Screenshot only what you have just verified is being served.
+
+**Do not judge whether a command "looks long" — wrap it unconditionally** if it does any of the following,
+however quick you expect it to be: starts a browser (headless or not), makes network requests, builds a
+project, starts or queries a local server, or runs docker. This list is not a heuristic to weigh; if the
+command matches, it gets a `timeout`.
+
+The reason the rule is unconditional: **a program's own self-termination flags do not replace the wrapper.**
+`--virtual-time-budget`, `--timeout`, `--max-time` and friends read like a built-in cap and make the wrapper
+feel redundant — which is exactly the trap. Those flags are honoured by the program's own event loop, so a
+request that never resolves means the flag is never evaluated and the "8-second" command runs until someone
+kills it. A command that advertises a short bound is not evidence that it is bounded.
+
+This applies **only while background mode is active**. In a normal interactive session the user is watching
+the terminal and sees a stuck command within seconds, so wrapping everything is unnecessary ceremony. In the
+background nobody is watching, the cost of a hang is measured in hours, and the wrapper is cheap.
 
 **Default to `timeout 600`** (10 min) and override only when the operation clearly warrants it. The value is
 a runaway *safety cap*, not a deadline, so it must sit generously ABOVE the realistic worst case — otherwise

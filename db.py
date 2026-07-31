@@ -43,24 +43,51 @@ def init(conn):
             status      TEXT    NOT NULL DEFAULT 'not_processed'
         )"""
     )
+    # Added later for attachments; ALTER on an existing inbox rather than a
+    # rebuild, so a DB created by an older version keeps its pending messages.
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(messages)")}
+    for column in ("media_path TEXT", "media_group_id TEXT"):
+        if column.split()[0] not in existing:
+            conn.execute(f"ALTER TABLE messages ADD COLUMN {column}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sess_status ON messages(session_id, status, update_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_received ON messages(received_at)")
     conn.commit()
 
 
-def store(conn, update_id, session_id, text, tg_date, received_at):
+def store(conn, update_id, session_id, text, tg_date, received_at, media_path=None, media_group_id=None):
     """Idempotent insert (dedup by update_id). Returns True if a new row was added."""
     cur = conn.execute(
-        "INSERT OR IGNORE INTO messages(update_id, session_id, text, tg_date, received_at) VALUES(?,?,?,?,?)",
-        (update_id, session_id, text, tg_date, received_at),
+        "INSERT OR IGNORE INTO messages"
+        "(update_id, session_id, text, tg_date, received_at, media_path, media_group_id)"
+        " VALUES(?,?,?,?,?,?,?)",
+        (update_id, session_id, text, tg_date, received_at, media_path, media_group_id),
     )
     return cur.rowcount > 0
+
+
+def owner_of_media_group(conn, media_group_id):
+    """Session that already owns this album, if any.
+
+    Telegram splits an album into one update per photo and puts the caption
+    (hence the routing tag) only on the first. Without this lookup every photo
+    after the first would fall through to "unrouted".
+    """
+    if not media_group_id:
+        return None
+    cur = conn.execute(
+        "SELECT session_id FROM messages WHERE media_group_id=? AND session_id!='unrouted'"
+        " ORDER BY update_id LIMIT 1",
+        (media_group_id,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
 
 
 def inbox(conn, session_id):
     """Unprocessed messages for this session, in arrival order."""
     cur = conn.execute(
-        "SELECT update_id, text FROM messages WHERE session_id=? AND status='not_processed' ORDER BY update_id",
+        "SELECT update_id, text, media_path FROM messages"
+        " WHERE session_id=? AND status='not_processed' ORDER BY update_id",
         (session_id,),
     )
     return cur.fetchall()
@@ -71,4 +98,14 @@ def mark(conn, update_id, status):
 
 
 def prune(conn, now_epoch):
-    conn.execute("DELETE FROM messages WHERE received_at < ?", (now_epoch - PRUNE_AGE_SEC,))
+    cutoff = now_epoch - PRUNE_AGE_SEC
+    # Delete the files before the rows, otherwise the paths are gone and the
+    # downloads leak into MEDIA_DIR forever.
+    for (path,) in conn.execute(
+        "SELECT media_path FROM messages WHERE received_at < ? AND media_path IS NOT NULL", (cutoff,)
+    ):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    conn.execute("DELETE FROM messages WHERE received_at < ?", (cutoff,))

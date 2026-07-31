@@ -71,8 +71,13 @@ def main():
     rows = db.inbox(conn, args.session)
     if rows:
         backoff = {"level": 0, "empty_streak": 0}  # message arrived -> poll fast again
-        for update_id, text in rows:
-            print(text)
+        for update_id, text, media_path in rows:
+            if text:
+                print(text)
+            # stdout can't carry an image, so hand over the path — the caller is
+            # told to open it with the Read tool and actually see the picture.
+            if media_path:
+                print(f"[image: {media_path}]")
             db.mark(conn, update_id, "read")
         conn.commit()
     else:

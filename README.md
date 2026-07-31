@@ -61,6 +61,12 @@ one bot is safe: each reads only its own inbox, nothing crosses wires, and a mes
 currently closed simply waits until it runs again — it's never dropped. A bare mention **without** the `$`
 is ignored on purpose.
 
+**Images, not just text.** Send a picture with the session tag in its **caption** and Claude sees the
+picture itself, not a filename — it is downloaded next to the skill and opened as part of the message.
+Compressed photos and images sent as files both work, and so do albums: put the caption on the first
+picture and the rest of the batch is routed along with it. The caption is what carries the tag, so a photo
+sent with the tag in a separate message won't route.
+
 **Progressive polling.** While idle, Claude checks Telegram on a timer. To avoid burning tokens on
 pointless checks during long silence, the interval backs off automatically — **2 → 5 → 10 → 20 minutes**,
 stepping up after a few empty checks — then **snaps right back to 2 minutes the instant you send

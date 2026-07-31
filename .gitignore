@@ -3,5 +3,6 @@ config.json
 messages.db
 messages.db-wal
 messages.db-shm
+media/
 __pycache__/
 *.pyc

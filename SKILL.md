@@ -24,7 +24,7 @@ All scripts live in `~/.claude/skills/claude-to-telegram/`.
 
 ## Files
 
-- `common.py` — config load, Telegram calls, `$tag` parsing/stripping
+- `common.py` — config load, Telegram calls, `$tag` parsing/stripping, attachment download
 - `db.py` — the shared SQLite inbox (schema, store, inbox, mark, prune; WAL mode)
 - `ingest.py` — pull from Telegram → route each message by its `$tag` → store → advance the offset **only up
   to what was stored** → prune >7 days
@@ -32,7 +32,7 @@ All scripts live in `~/.claude/skills/claude-to-telegram/`.
 - `ask.py` — send a question, block until this session's reply arrives (via the inbox)
 - `notify.py` — fire-and-forget status message
 - `install.py` — write + validate `config.json`
-- `config.json`, `messages.db`, `.backoff_*.json` — local only, gitignored
+- `config.json`, `messages.db`, `.backoff_*.json`, `media/` — local only, gitignored
 
 ## Install
 
@@ -96,6 +96,14 @@ until that session runs again.
 
 One rule if you touch the code: any new script that calls `getUpdates` must go through `ingest.py` — never
 advance the offset past what has been stored. The full set of invariants is in the README.
+
+**Images.** A picture sent with a caption is routed by the tag in that caption, downloaded into `media/`, and
+delivered as a line `[image: /abs/path.jpg]` after the text. **Open that path with the `Read` tool** — stdout
+cannot carry a picture, so the path is the only way you actually see it; treat it as part of the message, not
+as a file reference to mention back. Both compressed photos and images sent as files are handled. An album
+arrives as one update per picture with the caption on the first only, so the rest inherit the owner via
+`media_group_id` — expect several `[image: …]` lines under a single caption. A download that fails is
+skipped, never costing the message itself.
 
 ## Polling while the session is idle (CronCreate) + progressive back-off
 

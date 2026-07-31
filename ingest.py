@@ -22,6 +22,22 @@ import db
 GETUPDATES_LIMIT = 100  # Telegram max
 
 
+def _attachment_file_id(msg):
+    """file_id of an image in this message, or None.
+
+    Two shapes matter: "photo" (compressed — Telegram sends an array of sizes,
+    the last is the largest) and "document" (sent as a file, i.e. uncompressed —
+    which is how screenshots usually arrive when quality matters).
+    """
+    photo = msg.get("photo")
+    if photo:
+        return photo[-1]["file_id"]
+    doc = msg.get("document") or {}
+    if str(doc.get("mime_type", "")).startswith("image/"):
+        return doc.get("file_id")
+    return None
+
+
 def ingest(conn, token, chat_id):
     """Best-effort: on any error, return quietly — the caller still processes the
     inbox, and the next tick re-ingests. Returns number of new rows stored."""
@@ -49,13 +65,25 @@ def ingest(conn, token, chat_id):
             continue
         if str(msg.get("from", {}).get("id", "")) != chat_id:
             continue
-        text = msg.get("text", "") or ""
+        # A photo carries its text in "caption", not "text" — reading only the
+        # latter would strip the routing tag off every image.
+        text = msg.get("text") or msg.get("caption") or ""
+        group_id = msg.get("media_group_id")
         tag = common.find_tag(text)
         if tag:
             owner, clean = tag, common.strip_tag(text, tag)
         else:
-            owner, clean = "unrouted", text
-        if db.store(conn, uid, owner, clean if clean else text, msg.get("date"), now):
+            # Albums arrive as one update per photo with the caption on the first
+            # only, so inherit the owner the album was already routed to.
+            owner, clean = db.owner_of_media_group(conn, group_id) or "unrouted", text
+
+        media_path = None
+        file_id = _attachment_file_id(msg)
+        if file_id:
+            media_path = common.download_file(token, file_id, str(uid))
+
+        if db.store(conn, uid, owner, clean if clean else text, msg.get("date"), now,
+                    media_path, group_id):
             new_count += 1
 
     conn.commit()

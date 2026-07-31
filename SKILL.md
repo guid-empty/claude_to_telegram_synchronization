@@ -1,6 +1,6 @@
 ---
 name: claude-to-telegram
-description: Two-way communication with the user via a Telegram bot, when they explicitly ask to work in the background/remotely — no Claude Code hooks, no daemon; Claude runs small Python scripts and messages route through a shared SQLite inbox. Trigger when the user says "work in the background", "send questions/status to Telegram", "let's talk through the bot from now on", gives a session_id to use, explicitly invokes /claude-to-telegram, or /claude-to-telegram on|off. Do NOT apply as a standing behavior — only on explicit request, for one specific session.
+description: Two-way communication with the user over Telegram when they explicitly ask to work in the background or remotely — send status and questions to a Telegram bot and receive their replies; several parallel sessions can share one bot. Trigger when the user says "work in the background", "send questions/status to Telegram", "let's talk through the bot from now on", gives a session_id to use, explicitly invokes /claude-to-telegram, or /claude-to-telegram on|off. Do NOT apply as a standing behavior — only on explicit request, for one specific session.
 argument-hint: "install | on|off [session_id]"
 ---
 
@@ -81,37 +81,16 @@ Syntax: `/claude-to-telegram on|off [session_id]` — `session_id` optional thir
 **An `off`-like command sent from within Telegram** (caught by `check_new.py`, text reads as a stop) —
 handle it the same as an explicit `off` here.
 
-## How it works — ingest, then deliver
+## How it works
 
-Every poll does two phases:
+Every poll runs two phases. **Ingest** (`ingest.py`) drains Telegram into the shared inbox, filing each
+message under the session its `$tag` names, and only then advances the read cursor. **Deliver** prints this
+session's own unread messages (tag stripped) and marks them read. Doing it in that order is what keeps
+several sessions on one bot from erasing each other's mail, and a message for a closed session simply waits
+until that session runs again.
 
-1. **Ingest (any session drains Telegram for everyone)** — `ingest.py`:
-   `getUpdates(offset=0, limit=100)` → for each message find its `$tag` → `INSERT OR IGNORE` into
-   `messages.db` (owner = the tag, or `unrouted` if none) → advance the offset **only up to the max
-   `update_id` actually stored this batch** → prune rows older than 7 days.
-2. **Deliver (this session handles its own inbox)** — `SELECT ... WHERE session_id=<me> AND
-   status='not_processed' ORDER BY update_id`, print each (tag stripped), mark `read`.
-
-Why it's lossless and ordered (the invariants — keep them if you touch this code):
-- `getUpdates` returns updates in strictly ascending, gap-free `update_id` order. We store the whole batch,
-  then confirm the offset only up to that batch's max — so we never skip past an unstored message; a batch
-  beyond `limit` just arrives next call.
-- **Durability before confirm**: a message is in SQLite before its `update_id` is confirmed/dropped on
-  Telegram. A crash in between merely re-fetches it.
-- Idempotent (`update_id` PRIMARY KEY): parallel sessions ingesting the same updates, or a re-fetch, never
-  duplicate.
-- A message for a session whose poller is dead simply waits as `not_processed` until that session runs
-  again — closing/crashing a session loses nothing.
-
-## Multi-session safety (why the SQLite inbox exists)
-
-`getUpdates` is a **single-consumer** API: the offset is global per bot token, and confirming it drops
-updates for *every* reader. With several sessions polling one bot, naive per-session offsets erase each
-other's mail; and if nobody advances the offset, the queue grows until the newest messages fall outside the
-`limit` window and go invisible to all (this actually happened). The SQLite inbox resolves both: whoever
-polls **stores every message durably (routed by tag) before advancing the offset**, so the offset *can* be
-advanced safely (queue stays drained) and no reader loses another's mail. If you add a script that calls
-`getUpdates`, go through `ingest.py` — never advance the offset past what's been stored.
+One rule if you touch the code: any new script that calls `getUpdates` must go through `ingest.py` — never
+advance the offset past what has been stored. The full set of invariants is in the README.
 
 ## Polling while the session is idle (CronCreate) + progressive back-off
 
@@ -125,12 +104,12 @@ instant a message arrives. It can't reschedule the cron itself, so it prints a f
 
 Enable at the base interval:
 ```
-CronCreate(cron="*/2 * * * *", recurring=true, prompt="Проверь новые сообщения в Telegram: запусти
-python3 ~/.claude/skills/claude-to-telegram/check_new.py --session <session_id>. На финальной строке
-RESCHEDULE=<M> перепланируй этот polling-cron на */M (CronDelete текущий, CronCreate новый с тем же prompt,
-запомни id); RESCHEDULE=none — ничего. Если вывод только NOTHING_NEW — молчи. Если есть другой текст — это
-сообщение от пользователя: явно напиши 'Получено из Telegram: ...' и выполняй. НИКОГДА не выключай фоновый
-режим сам — только по явному off.")
+CronCreate(cron="*/2 * * * *", recurring=true, prompt="Check for new Telegram messages: run
+python3 ~/.claude/skills/claude-to-telegram/check_new.py --session <session_id>. If the final line is
+RESCHEDULE=<M>, reschedule this polling cron to */M (CronDelete the current job, CronCreate a new one with
+the same prompt, remember its id); RESCHEDULE=none — do nothing. If the output is only NOTHING_NEW — stay
+silent. Any other text is a message from the user: state 'Received from Telegram: ...' explicitly, then act
+on it. NEVER disable background mode on your own — only on an explicit off.")
 ```
 
 **CronCreate limits:** the job is session-only (gone when the CLI/session closes → re-create on next `on`),
@@ -163,13 +142,45 @@ python3 ~/.claude/skills/claude-to-telegram/notify.py --session <session_id> --m
 **NEVER call the native `AskUserQuestion` tool while background mode is active.** It is a *blocking* tool —
 it suspends the turn waiting for a click in the terminal UI, so the REPL is no longer idle, so the polling
 cron cannot fire. The result: polling silently stalls, the user's Telegram messages pile up unanswered for
-as long as the block lasts, and it looks like you hung. (Happened in practice: an `AskUserQuestion` blocked
-the session for hours while the user kept messaging.) If you need the user to choose something, **ask in
+as long as the block lasts, and it looks like you hung — a single blocking prompt can stall polling for
+hours while messages accumulate unread. If you need the user to choose something, **ask in
 Telegram** — send the numbered options via `notify.py`/`ask.py` (see "Emulating AskUserQuestion") and read
 the reply from the inbox. Never the native tool, not even for a "quick" confirm.
 
+**ALWAYS bound long-lived background commands with a `timeout` — and never trust "the notification will
+come."** A `Bash` call with `run_in_background: true` has NO built-in timeout (unlike a synchronous call,
+which defaults to ~120s). If such a command hangs, it hangs *forever* and never notifies — so if you're
+passively waiting on its completion event, you stall indefinitely and it looks exactly like the
+`AskUserQuestion` freeze above. Rules: (1) wrap any long/uncertain background command in a shell `timeout N`
+(e.g. `timeout 600 chrome --headless … --screenshot …`) so it self-kills; (2) never conclude a turn "waiting"
+on a single background task as your only continuation — poll its status actively (or set a fallback) and
+`pkill`/`kill` the hung process instead of waiting; (3) headless-Chrome screenshots of Flutter-web pages that
+init Firebase/network **hang** under `--virtual-time-budget` (virtual time never drains while Firebase waits
+on the network) — don't rely on them for such pages, they will not complete. An unbounded background
+screenshot of one can sit there for many hours before anyone notices.
+
+**A *synchronous* call is not safe either — it's the same freeze, only harder to spot.** The ~120s default
+protects you only until you override it; passing a generous `timeout` to a call that then hangs blocks the
+turn for exactly that long, the REPL never goes idle, and the polling cron never fires. Nothing is printed
+and the session answers normally in the terminal, so the only visible symptom is the user asking "are you
+stuck?" — into a mailbox nobody is reading. Diagnosis, in order: `ls -la .backoff_<session>.json` (its mtime
+is the last poll — stale mtime means polling is dead), then `ps -eo pid,etime,command | grep -i chrome` for a
+process with a multi-hour `etime`, then `kill -9` it; the session unblocks and drains its inbox on the next
+tick.
+
+Note that a *local* page is no safer than a remote one: if the dev server serving it has already exited, the
+request never resolves, `--virtual-time-budget` never drains, and the flag you added as an escape hatch
+guarantees the hang instead of bounding it. Screenshot only what you have just verified is being served.
+
+**Default to `timeout 600`** (10 min) and override only when the operation clearly warrants it. The value is
+a runaway *safety cap*, not a deadline, so it must sit generously ABOVE the realistic worst case — otherwise
+a healthy-but-slow run gets killed. 600s covers a web build or CI step comfortably; a docker build may need
+more, while a screenshot that *should* finish in ~30s can drop to ~120s. Too low a cap (60s on a 3-minute
+build) just destroys good work. And when a command is known to hang rather than run slow (headless+Firebase),
+a timeout only bounds the damage — prefer not running it at all.
+
 **Acknowledge on pickup.** When a task arrives via Telegram and will take more than an instant, send a short
-`notify.py` ack **before starting** ("📥 Прочитал, взял в работу: <one line>") so the away user knows it was
+`notify.py` ack **before starting** ("📥 Got it, working on: <one line>") so the away user knows it was
 picked up. One ack only — no progress spam; a completion notify follows when done. (Instant trivial answers
 need no ack.)
 

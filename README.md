@@ -71,6 +71,24 @@ in the runtime; see Requirements.)
 one-line "received, on it" the moment it starts — so you know it was picked up, not ignored — then a
 completion notice at the end. Exactly one ack on pickup, no constant progress updates in between.
 
+## Implementation invariants
+
+Only relevant if you plan to change the code — these four properties are what make the inbox lossless, and
+breaking any of them reintroduces dropped messages:
+
+- **Store before confirm.** A message is written to SQLite before its `update_id` is confirmed to Telegram.
+  A crash in between merely re-fetches it.
+- **Confirm no further than stored.** `getUpdates` returns updates in strictly ascending, gap-free
+  `update_id` order; the cursor advances only to the highest id actually stored in that batch, so nothing
+  unstored is ever skipped. Anything beyond `limit` simply arrives on the next call.
+- **Idempotent writes.** `update_id` is the PRIMARY KEY, so parallel sessions ingesting the same batch — or
+  a re-fetch after a crash — cannot duplicate a message.
+- **Nothing is addressed to a running process.** A message for a session whose poller is dead just sits as
+  `not_processed` until that session runs again; closing or crashing a session loses nothing.
+
+Consequently, any new script that talks to `getUpdates` must go through `ingest.py` rather than calling the
+API directly.
+
 ## Setup
 
 1. Copy this folder to `~/.claude/skills/claude-to-telegram/`

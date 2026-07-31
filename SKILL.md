@@ -67,9 +67,14 @@ Syntax: `/claude-to-telegram on|off [session_id]` — `session_id` optional thir
 2. Tell the user (in the normal interface) the final `session_id`, and that to reach this session they
    prefix a Telegram message with `$<session_id>` (e.g. `$my-session do X`).
 3. `notify.py --session <id> --message "Background mode enabled"`.
-4. Create a recurring `CronCreate` job at the base interval (`*/2 * * * *`) that self-adjusts via
+4. **Delete `~/.claude/skills/claude-to-telegram/.backoff_<session_id>.json` if it exists.** It survives
+   `off` and still holds the interval this session had reached last time; the cron you are about to create
+   starts at 2 min, so a stale file makes `check_new.py` compare against the wrong interval and print
+   `RESCHEDULE=none` forever — the ladder never climbs and every tick burns an inference call at the most
+   expensive rung.
+5. Create a recurring `CronCreate` job at the base interval (`*/2 * * * *`) that self-adjusts via
    back-off (see "Polling" below) — remember its job id for the later `CronDelete`.
-5. Follow the "Background mode protocol" at the end of every turn until an explicit off.
+6. Follow the "Background mode protocol" at the end of every turn until an explicit off.
 
 `/claude-to-telegram off [session_id]`:
 1. If enabled this conversation — `notify.py --session <id> --message "Background mode disabled"`.

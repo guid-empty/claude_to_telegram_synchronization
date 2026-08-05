@@ -221,6 +221,24 @@ received and how you're proceeding. Exit the mode only on an explicit stop from 
 announcement is not consent — only an explicit `off` (here, or a stop-like command from Telegram) is.
 Silence, however long, is not a stop signal.
 
+## Working in a git worktree
+
+Background work usually runs while the user is elsewhere in the same repo, so an isolated worktree is the
+default — it keeps the session from touching the user's working tree.
+
+**Name it `worktree-<session_id>-<YYYY-MM-DD>[-<suffix>]`** — session id first, then the date the work
+started, then an optional suffix when the same session explores several approaches in parallel
+(`worktree-bugs-2026-08-05-tables`, `worktree-bugs-2026-08-05-history`). Use the same string for the branch
+and for the directory under `.claude/worktrees/`:
+
+```bash
+git worktree add .claude/worktrees/<session_id>-<YYYY-MM-DD> \
+  -b worktree-<session_id>-<YYYY-MM-DD> main
+```
+
+The prefix is what makes a stray worktree identifiable months later: it says which session created it and
+when, without opening a single file.
+
 ## Security
 
 - Never commit `config.json` or `messages.db` (both gitignored).

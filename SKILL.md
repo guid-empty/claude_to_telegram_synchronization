@@ -214,6 +214,11 @@ first quote or newline.
 **Tables and headings only exist in `rich`.** Classic HTML rejects them outright — `Unsupported start tag
 "table"` — so a report built on `<table>` must go out as `rich`, not `html`.
 
+Keep cell values short: a narrow column breaks a long `<code>` value mid-character
+(`correct=fals` / `e`). Put long identifiers in the text under the table, not in a cell. A `<pre>` block
+is rendered with a **copy** button and syntax highlighting, which makes it the right place for anything
+the reader may want to reuse.
+
 Inline markup works **inside table cells** — bold, italic, `<code>`, links, strikethrough and emoji all
 render there, so a status column can carry `<code>correct=null</code>` or a clickable PR link rather than
 bare text.

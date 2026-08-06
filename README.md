@@ -90,6 +90,15 @@ background-task tool; see Requirements.
 one-line "received, on it" the moment it starts — so you know it was picked up, not ignored — then a
 completion notice at the end. Exactly one ack on pickup, no constant progress updates in between.
 
+**Formatted reports.** Status messages can carry real formatting: `notify.py --format html` unlocks bold,
+code, links, spoilers and **collapsible `<blockquote expandable>` blocks**; `--format rich`
+(`sendRichMessage`, Bot API 10.1) adds headings, **real tables**, lists and image collages, where the
+collapsible block is `<details><summary>` instead (`expandable` renders open there).
+Useful for end-of-task reports — a table of what shipped beats the same facts as prose, and long
+root-cause detail hides behind a tap instead of burying the summary. If the API rejects the markup the
+message still goes out, degraded to HTML and then to plain text, and the downgrade is printed rather than
+hidden.
+
 ## Implementation invariants
 
 Only relevant if you plan to change the code — these four properties are what make the inbox lossless, and

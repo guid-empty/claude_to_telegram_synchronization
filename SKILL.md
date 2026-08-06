@@ -193,6 +193,44 @@ deliver the reply; in background mode prefer `notify.py` + the cron.
 Format numbered options directly in the `--message` text ("1. A\n2. B\n\nReply with a number or text"). The
 reply is plain text; interpret a bare number as that choice, else free-form (the "Other" equivalent).
 
+## Formatted reports
+
+`notify.py --format rich|html` sends a formatted message. Use it for work reports — a table of what
+shipped reads better than the same facts as prose.
+
+```
+python3 notify.py --session <id> --format rich --message-file report.html
+```
+
+Pass long markup with `--message-file`: quoting a multi-line report on the command line breaks on the
+first quote or newline.
+
+| Format | Method | What it renders |
+|---|---|---|
+| `plain` (default) | `sendMessage` | text as typed |
+| `html` | `sendMessage` + `parse_mode=HTML` | `<b> <i> <u> <s> <code> <pre> <a>`, `<tg-spoiler>`, `<blockquote>`, `<blockquote expandable>` |
+| `rich` | `sendRichMessage` (Bot API 10.1) | all of the above **plus** `<h1>`–`<h6>`, real `<table>`, `<ul>/<ol>`, `<details>`, `<mark>`, `<tg-collage>`, `<tg-slideshow>` |
+
+**Tables and headings only exist in `rich`.** Classic HTML rejects them outright — `Unsupported start tag
+"table"` — so a report built on `<table>` must go out as `rich`, not `html`.
+
+Inline markup works **inside table cells** — bold, italic, `<code>`, links, strikethrough and emoji all
+render there, so a status column can carry `<code>correct=null</code>` or a clickable PR link rather than
+bare text.
+
+**Collapsing differs between the two formats — verified on a real client, not assumed:**
+
+- in `html`, `<blockquote expandable>` collapses behind a tap;
+- in `rich`, that same tag renders **fully expanded**; the accordion there is `<details><summary>Title</summary>…</details>`;
+- `<tg-spoiler>` works in both, but it blurs the text rather than folding it away.
+
+Use collapsing for long detail — a root-cause write-up, a diff, a list of skipped cases — so it doesn't
+bury the summary. Conclusion in the open, reasoning inside.
+
+Formatting degrades instead of failing: rejected `rich` retries as `html`, rejected `html` retries as
+plain text with tags stripped. `notify.py` prints `формат понижен: rich → html` when that happens, so a
+silently uglier report is still visible as a downgrade rather than guessed at from the phone.
+
 ## Just notify (no reply expected)
 
 ```bash

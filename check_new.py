@@ -52,6 +52,18 @@ def interval_for_level(level):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--session", required=True)
+    # Пометить доставленное не сразу, а после ответа пользователю. Смысл: пока
+    # запрос не отработан, он виден в базе как незакрытый — по нему можно
+    # понять, что сессия взяла задачу и ещё не отчиталась. Закрывает такие
+    # сообщения notify.py --done.
+    #
+    # По умолчанию поведение прежнее: параллельные сессии этого флага не
+    # передают, и для них ничего не меняется.
+    parser.add_argument(
+        "--defer-read",
+        action="store_true",
+        help="mark delivered messages as in_progress; notify.py --done closes them",
+    )
     args = parser.parse_args()
 
     config = common.load_config()
@@ -78,7 +90,7 @@ def main():
             # told to open it with the Read tool and actually see the picture.
             if media_path:
                 print(f"[image: {media_path}]")
-            db.mark(conn, update_id, "read")
+            db.mark(conn, update_id, "in_progress" if args.defer_read else "read")
         conn.commit()
     else:
         backoff["empty_streak"] += 1

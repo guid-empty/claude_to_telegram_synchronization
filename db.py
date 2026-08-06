@@ -93,6 +93,20 @@ def inbox(conn, session_id):
     return cur.fetchall()
 
 
+def close_in_progress(conn, session_id):
+    """Пометить взятые в работу сообщения сессии как обработанные.
+
+    Возвращает число закрытых. Трогает только СВОЮ сессию: у каждой свой
+    рабочий цикл, и чужие незакрытые задачи закрывать нельзя.
+    """
+    cur = conn.execute(
+        "UPDATE messages SET status='read'"
+        " WHERE session_id=? AND status='in_progress'",
+        (session_id,),
+    )
+    return cur.rowcount
+
+
 def mark(conn, update_id, status):
     conn.execute("UPDATE messages SET status=? WHERE update_id=?", (status, update_id))
 

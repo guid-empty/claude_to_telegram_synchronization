@@ -94,6 +94,20 @@ session's own unread messages (tag stripped) and marks them read. Doing it in th
 several sessions on one bot from erasing each other's mail, and a message for a closed session simply waits
 until that session runs again.
 
+**Delivered ≠ handled.** By default delivery marks a message `read` the moment it is printed, so the database
+cannot tell "the session picked this up" from "the session already finished it". Pass `--defer-read` to
+`check_new.py` and delivery marks the message `in_progress` instead — the request stays visibly open until
+the session reports back with `notify.py … --done`, which flips this session's `in_progress` rows to `read`
+(and prints how many it closed). The full lifecycle is `not_processed` → `in_progress` → `read`. That middle
+state is worth having twice over: it answers "what is this session actually working on right now" when you
+are debugging, and it tells the away user their request wasn't quietly dropped.
+
+Closing happens **only after the message is sent successfully** — if the send fails the request stays open,
+which is more honest than losing it silently. An `in_progress` message is never re-delivered (the inbox
+selects only `not_processed`), so there are no duplicates, and `--done` touches its own session and nobody
+else's. Both flags are optional by design: a parallel session that passes neither behaves exactly as it did
+before, so adding this mode breaks nothing that already runs.
+
 One rule if you touch the code: any new script that calls `getUpdates` must go through `ingest.py` — never
 advance the offset past what has been stored. The full set of invariants is in the README.
 
@@ -118,12 +132,16 @@ instant a message arrives. It can't reschedule the cron itself, so it prints a f
 Enable at the base interval:
 ```
 CronCreate(cron="*/2 * * * *", recurring=true, prompt="Check for new Telegram messages: run
-python3 ~/.claude/skills/claude-to-telegram/check_new.py --session <session_id>. If the final line is
+python3 ~/.claude/skills/claude-to-telegram/check_new.py --session <session_id> --defer-read. If the final line is
 RESCHEDULE=<M>, reschedule this polling cron to */M (CronDelete the current job, CronCreate a new one with
 the same prompt, remember its id); RESCHEDULE=none — do nothing. If the output is only NOTHING_NEW — stay
 silent. Any other text is a message from the user: state 'Received from Telegram: ...' explicitly, then act
 on it. NEVER disable background mode on your own — only on an explicit off.")
 ```
+
+`--defer-read` is what keeps a picked-up task visible as `in_progress` until you answer it with
+`notify.py … --done` (see "How it works"). Drop the flag and polling reverts to the old behaviour: everything
+delivered is `read` at once.
 
 **CronCreate limits:** the job is session-only (gone when the CLI/session closes → re-create on next `on`),
 auto-expires after 7 days, and every tick is a real inference call (hence the back-off). On `off`, always
@@ -148,7 +166,12 @@ reply is plain text; interpret a bare number as that choice, else free-form (the
 
 ```bash
 python3 ~/.claude/skills/claude-to-telegram/notify.py --session <session_id> --message "<status>"
+python3 ~/.claude/skills/claude-to-telegram/notify.py --session <session_id> --message "<result>" --done
 ```
+
+Add `--done` when the message is the **final answer** on a request that was delivered with `--defer-read`: it
+closes this session's open requests once the send goes through. Interim messages — the pickup ack, progress
+updates — go **without** `--done`, the task isn't finished yet.
 
 ## Background mode protocol
 
@@ -209,8 +232,9 @@ a timeout only bounds the damage — prefer not running it at all.
 
 **Acknowledge on pickup.** When a task arrives via Telegram and will take more than an instant, send a short
 `notify.py` ack **before starting** ("📥 Got it, working on: <one line>") so the away user knows it was
-picked up. One ack only — no progress spam; a completion notify follows when done. (Instant trivial answers
-need no ack.)
+picked up. One ack only — no progress spam; a completion notify follows when done. Send the ack **without**
+`--done` and put `--done` on that completion notify — the request stays `in_progress` for exactly as long as
+the work does. (Instant trivial answers need no ack.)
 
 **Read the inbox immediately before every send.** Long work — a build, a deploy, a verification run — takes
 minutes, and in those minutes the user keeps typing: corrections, refinements, answers to questions you asked

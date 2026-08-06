@@ -212,6 +212,15 @@ a timeout only bounds the damage — prefer not running it at all.
 picked up. One ack only — no progress spam; a completion notify follows when done. (Instant trivial answers
 need no ack.)
 
+**Read the inbox immediately before every send.** Long work — a build, a deploy, a verification run — takes
+minutes, and in those minutes the user keeps typing: corrections, refinements, answers to questions you asked
+earlier. Firing off a message you composed before all that arrived puts the two of you out of sync: you ask
+about something already answered, or report on a task the user has since redefined. It has happened for real —
+a message went out saying "three options are waiting for your choice" when the choice had arrived long before
+and the work was already done against it. So right before each `notify.py`/`ask.py` call, run `check_new.py`
+for your session and actually read what came in; if there are corrections, fold them in first and only then
+send — quite possibly a different message than the one you had drafted. One script call, and it costs nothing.
+
 At the end of each turn, deliver a short summary + "what's next" (via `ask.py` to block for a reply, or just
 end and let the cron catch the next message). When you get a reply, say in the normal interface what was
 received and how you're proceeding. Exit the mode only on an explicit stop from the user.

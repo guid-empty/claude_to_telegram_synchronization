@@ -9,6 +9,15 @@ new instructions from your phone.
 Doesn't use Claude Code hooks (`PermissionRequest`/`AskUserQuestion`) and doesn't require a persistent
 daemon — Claude explicitly calls a plain script whenever it needs to ask something or report status.
 
+## TL;DR
+
+Claude asks from the terminal, you answer from your phone, Claude reports back — the whole loop lives in
+Telegram, and the reply carries a `$session` tag so several parallel sessions can share one bot:
+
+| Claude asks → you answer | Claude reports back |
+|---|---|
+| ![Question and answer in Telegram](assets/dialogue.jpg) | ![Report with a table](assets/report-details.jpg) |
+
 ## Why
 
 Claude Code is an interactive tool — you're normally sitting right there, answering prompts and
@@ -50,6 +59,16 @@ Claude:
    …and sends a completion notice when done. No progress spam in between.
 5. When you're done — `/claude-to-telegram off`, or just say "stop, I'll be back" — Claude returns to
    normal behavior with no more notifications.
+
+### What a report looks like
+
+Reports go out with `--format rich`, so they carry real structure instead of a wall of text: headings,
+tables with inline formatting inside cells, and long detail folded away behind `<details>` so it doesn't
+bury the summary.
+
+| Work report | Deploy notice |
+|---|---|
+| ![Work report with a collapsed detail block](assets/report-work.jpg) | ![Deploy notice](assets/report-deploy.jpg) |
 
 ## Behavior details
 

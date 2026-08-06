@@ -56,7 +56,7 @@ def send_message(token, chat_id, text, mode="plain"):
         try:
             telegram_request(
                 token, "sendRichMessage",
-                {"chat_id": chat_id, "rich_message": {"html": text}},
+                {"chat_id": chat_id, "rich_message": {"html": _rich_breaks(text)}},
             )
             return "rich"
         except Exception:
@@ -81,6 +81,35 @@ def send_message(token, chat_id, text, mode="plain"):
 _TAG_RE = re.compile(r"<[^>]+>")
 
 _ENTITIES = (("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'), ("&amp;", "&"))
+
+
+_PRE_RE = re.compile(r"(<pre.*?</pre>|<code.*?</code>)", re.DOTALL | re.IGNORECASE)
+
+# Перенос рядом с блочным тегом лишний: тег и так начинает новую строку, а
+# <br> между <tbody> и <tr> ломает таблицу пустой строкой.
+_BLOCK = "p|div|h[1-6]|ul|ol|li|table|tbody|thead|tr|td|th|blockquote|details|summary"
+_BLOCK_EDGE_RE = re.compile(
+    rf"\s*\n\s*(?=</?(?:{_BLOCK})[\s>])|(?<=>)\s*\n(?=\s*<)",
+    re.IGNORECASE,
+)
+
+
+def _rich_breaks(html):
+    """Одиночные переносы → <br> для sendRichMessage.
+
+    Rich HTML схлопывает переносы по правилам HTML, поэтому набранный
+    построчно текст приезжает одним абзацем: «… fell back to localhost. 1.
+    Point the suite … 2. Mark it …». Блочные теги свой перенос дают сами —
+    после них <br> не нужен, иначе между строками таблицы появятся пустоты.
+    Внутри <pre>/<code> переносы значимы и остаются нетронутыми.
+    """
+    parts = _PRE_RE.split(html or "")
+    for i, part in enumerate(parts):
+        if i % 2:  # чётные — обычный текст, нечётные — pre/code
+            continue
+        part = _BLOCK_EDGE_RE.sub("", part)
+        parts[i] = part.replace("\n", "<br>")
+    return "".join(parts)
 
 
 def strip_html(text):

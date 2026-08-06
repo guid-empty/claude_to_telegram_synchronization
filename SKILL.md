@@ -28,7 +28,9 @@ All scripts live in `~/.claude/skills/claude-to-telegram/`.
 - `db.py` — the shared SQLite inbox (schema, store, inbox, mark, prune; WAL mode)
 - `ingest.py` — pull from Telegram → route each message by its `$tag` → store → advance the offset **only up
   to what was stored** → prune >7 days
-- `check_new.py` — one background poll for a session: ingest, then deliver this session's own inbox
+- `check_new.py` — one background poll for a session (engine=cron): ingest, then deliver this session's own inbox
+- `watch.py` — long-running delivery loop for `engine=monitor`: same ingest+deliver, but prints only
+  actual messages (and its own failures), so every line is a notification worth reading
 - `ask.py` — send a question, block until this session's reply arrives (via the inbox)
 - `notify.py` — fire-and-forget status message
 - `install.py` — write + validate `config.json`
@@ -58,7 +60,35 @@ or a natural phrase ("work in the background, questions to Telegram", "let's tal
 
 ## Arguments
 
-Syntax: `/claude-to-telegram on|off [session_id]` — `session_id` optional third word.
+Syntax: `/claude-to-telegram on|off [session_id] [engine=cron|monitor]` — `session_id` optional third
+word, `engine` optional and **defaults to `cron`**.
+
+**Which engine to use.** `cron` fires only while the REPL is idle, so anything that arrives mid-task waits
+until the task ends — measured on a live day of use: median 2 min, 90th percentile 14 min, worst 20 min.
+That gap is invisible to the sender and reads as being ignored. `monitor` streams instead of polling on a
+schedule: the message surfaces during the work, like a message typed into the CLI. Use `cron` for
+long quiet stretches (it costs nothing while silent), `monitor` when the user is actively sending
+follow-ups to work already in progress.
+
+Never run both for the same session — two readers drain the same inbox and each message lands twice.
+
+`/claude-to-telegram on [session_id] engine=monitor`:
+1. Determine `session_id` exactly as for `cron` (see below), tell the user, `notify.py … "Background mode
+   enabled"`.
+2. Do NOT create a cron job and do NOT touch `.backoff_*` — the ladder belongs to the cron engine.
+3. Start the watcher and keep its task id for the later stop:
+   ```
+   Monitor({
+     command: "python3 ~/.claude/skills/claude-to-telegram/watch.py --session <id>",
+     description: "Telegram messages for <id>",
+     persistent: true,
+   })
+   ```
+4. Every emitted line is a message from the user (or a `WATCH_ERROR`/`WATCH_FATAL` line about the watcher
+   itself). Treat text lines exactly as `check_new.py` output: say "Received from Telegram: …" and act.
+   There is no `NOTHING_NEW` and no `RESCHEDULE` — silence means no mail.
+5. Follow the "Background mode protocol" as usual. On `off`: `notify.py … "Background mode disabled"`,
+   then `TaskStop` the monitor (not `CronDelete`).
 
 `/claude-to-telegram on [session_id]`:
 1. Determine `session_id`: use the one given (command arg, or named earlier in the conversation); else
@@ -78,7 +108,8 @@ Syntax: `/claude-to-telegram on|off [session_id]` — `session_id` optional thir
 
 `/claude-to-telegram off [session_id]`:
 1. If enabled this conversation — `notify.py --session <id> --message "Background mode disabled"`.
-2. `CronDelete` the polling job (use `CronList` if you lost the id).
+2. Stop the delivery: `CronDelete` the polling job for `engine=cron` (use `CronList` if you lost the id),
+   or `TaskStop` the watcher for `engine=monitor`.
 3. Back to normal turn completion.
 
 `/claude-to-telegram` with no args — just load this instruction into context; don't change session state.

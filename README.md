@@ -67,11 +67,24 @@ Compressed photos and images sent as files both work, and so do albums: put the 
 picture and the rest of the batch is routed along with it. The caption is what carries the tag, so a photo
 sent with the tag in a separate message won't route.
 
-**Progressive polling.** While idle, Claude checks Telegram on a timer. To avoid burning tokens on
-pointless checks during long silence, the interval backs off automatically — **2 → 5 → 10 → 20 minutes**,
-stepping up after a few empty checks — then **snaps right back to 2 minutes the instant you send
-something**. Responsive when you're active, cheap when you're away. (This needs `CronCreate`/`CronDelete`
-in the runtime; see Requirements.)
+**Two delivery engines: `cron` (default) and `monitor`.** They differ in *when* a session learns about
+your message, not in what it does with it.
+
+*`cron`* checks Telegram on a timer while Claude is idle, and backs the interval off during silence —
+**2 → 5 → 10 → 20 minutes**, snapping back to 2 the instant you send something. Cheap when you're away.
+Its blind spot: the timer only fires while the session is idle, so a message sent **while Claude is
+working** waits until the current task ends. Measured over a live day of use: median 2 min, 90th
+percentile 14 min, worst case 20 min. From your side that gap is invisible and looks exactly like being
+ignored — you send a follow-up mid-task and it seems to go unread.
+
+*`monitor`* replaces the timer with a streaming watcher (`watch.py`): messages surface **during** the
+work, the same way text typed into the CLI does. It polls every 15 s regardless of what the session is
+busy with, so a follow-up lands in seconds instead of minutes.
+
+Pick `cron` for long quiet stretches, `monitor` when you're actively sending follow-ups to work already
+in progress. **Never run both for one session** — two readers drain the same inbox and each message is
+delivered twice. `cron` needs `CronCreate`/`CronDelete` in the runtime, `monitor` needs a `Monitor`-style
+background-task tool; see Requirements.
 
 **Acknowledge on pickup.** Hand Claude a task via Telegram that takes more than an instant, and it fires a
 one-line "received, on it" the moment it starts — so you know it was picked up, not ignored — then a
@@ -108,7 +121,8 @@ For how to get a bot token and chat_id, see `SKILL.md` → "Setup".
 | Command | Effect |
 |---|---|
 | `/claude-to-telegram install` | Initial setup (bot token + chat_id) |
-| `/claude-to-telegram on [session_id]` | Enable background mode |
+| `/claude-to-telegram on [session_id]` | Enable background mode (engine `cron`) |
+| `/claude-to-telegram on [session_id] engine=monitor` | Enable with streaming delivery — no waiting for the session to go idle |
 | `/claude-to-telegram off [session_id]` | Disable background mode |
 | `/claude-to-telegram` | Show what's available without changing state |
 
@@ -121,7 +135,9 @@ Claude reads when the skill is invoked. A Russian reference copy is at [`SKILL.r
 - `common.py` — config, Telegram calls, `$tag` parsing
 - `db.py` — the shared SQLite inbox (schema, store, deliver, prune)
 - `ingest.py` — pull from Telegram → route by tag → store → advance the cursor safely
-- `check_new.py` — one background poll: ingest, then deliver this session's inbox
+- `check_new.py` — one background poll (`engine=cron`): ingest, then deliver this session's inbox
+- `watch.py` — streaming delivery loop (`engine=monitor`): same ingest and inbox, but runs continuously and
+  prints only real messages and its own failures, so every line is worth a notification
 - `ask.py` — send a question, block until this session's reply arrives
 - `notify.py` — send a status update, no reply expected
 - `install.py` — sets up and validates `config.json`

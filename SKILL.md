@@ -72,9 +72,34 @@ follow-ups to work already in progress.
 
 Never run both for the same session — two readers drain the same inbox and each message lands twice.
 
+### The enable message must state the permission mode
+
+The user is walking away from the terminal, so the one thing they cannot see is whether this session can
+actually *act* unattended. State it in the enable message:
+
+```
+Background mode enabled (session: <id>, <mode>, engine=<engine>)
+```
+
+`<mode>` is this session's permission mode — `auto`, `manual`, `plan`, or `bypass`.
+
+**`manual` gets an alert marker**, because in that mode the session stops at every confirmation dialog and
+the away user is the only one who can clear it — background work will stall on the first tool call and look
+like a hang:
+
+```
+⚠️ Background mode enabled (session: bugs, manual — every action waits for confirmation, engine=monitor)
+```
+
+**If you cannot determine the mode with confidence, say `manual`.** That is the conservative direction: a
+session wrongly announced as `manual` costs the user a moment of doubt, while one wrongly announced as
+`auto` promises unattended work it cannot deliver, and the user finds out hours later from a mailbox nobody
+read. Plan mode is always known to you explicitly; treat its absence plus unprompted tool calls as `auto`,
+and anything less certain as `manual`.
+
 `/claude-to-telegram on [session_id] engine=monitor`:
 1. Determine `session_id` exactly as for `cron` (see below), tell the user, `notify.py … "Background mode
-   enabled"`.
+   enabled (session: <id>, <mode>, engine=monitor)"` — including the permission mode, see above.
 2. Do NOT create a cron job and do NOT touch `.backoff_*` — the ladder belongs to the cron engine.
 3. Start the watcher and keep its task id for the later stop:
    ```
@@ -96,7 +121,8 @@ Never run both for the same session — two readers drain the same inbox and eac
    from the "Scratchpad Directory" path in your system prompt, not a separate tool call).
 2. Tell the user (in the normal interface) the final `session_id`, and that to reach this session they
    prefix a Telegram message with `$<session_id>` (e.g. `$my-session do X`).
-3. `notify.py --session <id> --message "Background mode enabled"`.
+3. `notify.py --session <id> --message "Background mode enabled (session: <id>, <mode>, engine=cron)"` —
+   including the permission mode, see "The enable message must state the permission mode" above.
 4. **Delete `~/.claude/skills/claude-to-telegram/.backoff_<session_id>.json` if it exists.** It survives
    `off` and still holds the interval this session had reached last time; the cron you are about to create
    starts at 2 min, so a stale file makes `check_new.py` compare against the wrong interval and print
@@ -141,6 +167,26 @@ before, so adding this mode breaks nothing that already runs.
 
 One rule if you touch the code: any new script that calls `getUpdates` must go through `ingest.py` — never
 advance the offset past what has been stored. The full set of invariants is in the README.
+
+**Undeliverable mail answers back.** Routing by `$tag` is strict, which used to mean a message could fail
+silently: a typo (`$intergation` for `$integration`) filed it under a session that does not exist, and a
+message with no tag at all went to `unrouted` — in both cases the sender saw it delivered and assumed the
+task had been handed over, while nobody ever read it. Real cases sat unnoticed for four days.
+
+Now `ingest.py` checks the tag against a registry of live sessions (table `sessions`, refreshed by
+`check_new.py`, `watch.py` and `notify.py` whenever a session acts) and replies in the bot:
+
+- **unknown tag** — names it, suggests the closest live session (`difflib`, so `intergation` → `integration`),
+  and lists the active ones. The message is still stored under the tag as typed: if a session with that name
+  shows up later, it collects it. A warning is a hint, not a rejection.
+- **no tag, exactly one live session** — delivered to it. There is no ambiguity to resolve, and refusing
+  would be pedantry.
+- **no tag, several live sessions** — stays `unrouted`, and the bot asks for a tag, listing the candidates.
+  Guessing here is worse than not delivering: the wrong session would start doing work that isn't its own.
+
+Warnings are raised only for **newly stored** rows and aggregated into **one message per ingest run** —
+`ingest` runs every 15 seconds under `monitor`, so a warning tied to the message rather than to its novelty
+would turn help into a spam feed. Covered by `test_routing.py`.
 
 **Images.** A picture sent with a caption is routed by the tag in that caption, downloaded into `media/`, and
 delivered as a line `[image: /abs/path.jpg]` after the text. **Open that path with the `Read` tool** — stdout

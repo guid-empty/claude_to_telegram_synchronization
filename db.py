@@ -19,10 +19,16 @@ that session runs again — so nothing is lost when a session is closed/crashes.
 """
 import os
 import sqlite3
+import time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(SCRIPT_DIR, "messages.db")
 PRUNE_AGE_SEC = 7 * 24 * 3600  # drop anything older than 7 days regardless of status
+
+# Сессия считается известной, если обращалась к инбоксу за это время. Порог
+# щедрый намеренно: ложное «сессия неизвестна» пугает пользователя зря, а
+# устаревшая запись в списке подсказок стоит одной лишней строки.
+KNOWN_SESSION_AGE_SEC = 30 * 24 * 3600
 
 
 def get_conn():
@@ -51,7 +57,45 @@ def init(conn):
             conn.execute(f"ALTER TABLE messages ADD COLUMN {column}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sess_status ON messages(session_id, status, update_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_received ON messages(received_at)")
+    # Реестр живых сессий. Нужен, чтобы отличить опечатку в теге от сессии,
+    # которая просто сейчас не запущена: без этого списка `$intergation` и
+    # `$integration` для ingest неразличимы, и сообщение молча оседает под
+    # несуществующим адресатом.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS sessions(
+            session_id TEXT    PRIMARY KEY,
+            last_seen  INTEGER NOT NULL
+        )"""
+    )
     conn.commit()
+
+
+def touch_session(conn, session_id):
+    """Отметить сессию живой.
+
+    Вызывается всеми точками входа, где сессия себя проявляет: доставка
+    (check_new/watch) и отправка (notify). Регистрация именно на отправке важна
+    для первого запуска: `on` начинается с notify «Фоновый режим включён», и к
+    приходу первого входящего сессия уже в списке — иначе первое же сообщение
+    получило бы ложное «тег не найден».
+    """
+    if not session_id or session_id == "unrouted":
+        return
+    conn.execute(
+        "INSERT INTO sessions(session_id, last_seen) VALUES(?,?)"
+        " ON CONFLICT(session_id) DO UPDATE SET last_seen=excluded.last_seen",
+        (session_id, int(time.time())),
+    )
+
+
+def known_sessions(conn, now_epoch=None, max_age_sec=KNOWN_SESSION_AGE_SEC):
+    """Сессии, проявлявшие себя за последнее время, свежие первыми."""
+    now = now_epoch if now_epoch is not None else int(time.time())
+    cur = conn.execute(
+        "SELECT session_id FROM sessions WHERE last_seen >= ? ORDER BY last_seen DESC",
+        (now - max_age_sec,),
+    )
+    return [r[0] for r in cur.fetchall()]
 
 
 def store(conn, update_id, session_id, text, tg_date, received_at, media_path=None, media_group_id=None):

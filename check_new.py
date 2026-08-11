@@ -72,6 +72,10 @@ def main():
 
     conn = db.get_conn()
     db.init(conn)
+    # Отмечаемся живыми ДО ingest: иначе на первом же прогоне собственный тег
+    # сессии выглядел бы неизвестным и ловил ложное «тег не найден».
+    db.touch_session(conn, args.session)
+    conn.commit()
 
     backoff = load_backoff(args.session)
     prev_interval = interval_for_level(backoff["level"])

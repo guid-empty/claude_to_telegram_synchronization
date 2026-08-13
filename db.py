@@ -34,7 +34,11 @@ KNOWN_SESSION_AGE_SEC = 30 * 24 * 3600
 def get_conn():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    # 15 секунд, а не 5: писателей столько же, сколько параллельных сессий, и
+    # каждая иногда удерживает базу дольше обычного — например, ingest пишет
+    # пачку из сотни апдейтов. Ждать здесь дешевле, чем ронять доставку
+    # ошибкой «database is locked».
+    conn.execute("PRAGMA busy_timeout=15000")
     return conn
 
 

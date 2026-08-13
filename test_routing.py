@@ -12,6 +12,7 @@
 Запуск:  python3 test_routing.py
 """
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -197,6 +198,37 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(self.owner_of(10), "alpha")
         self.assertEqual(self.owner_of(11), "alpha", "хвост альбома идёт к владельцу")
         self.assertEqual(self.sent, [], "альбом — не повод для предупреждения")
+
+    # --- конкуренция за общую базу ----------------------------------------
+
+    def test_uncommitted_touch_blocks_other_sessions(self):
+        """Отметка в реестре обязана коммититься сразу.
+
+        Регрессия из реальной работы: watch.py вызывал touch_session и
+        коммитил только в конце круга — то есть write-транзакция висела всё
+        время сетевого getUpdates внутри ingest (до 20 секунд). Параллельные
+        сессии в это окно получали «database is locked».
+
+        Тест фиксирует оба состояния: незакоммиченная отметка блокирует, а
+        закоммиченная — нет.
+        """
+        other = sqlite3.connect(self.db_path, timeout=0)
+        other.execute("PRAGMA busy_timeout=100")  # не ждать долго, нам нужен факт
+        try:
+            db.touch_session(self.conn, "writer")  # транзакция открыта, не закрыта
+            with self.assertRaises(sqlite3.OperationalError):
+                other.execute(
+                    "INSERT INTO sessions(session_id, last_seen) VALUES('rival', 1)"
+                )
+                other.commit()
+
+            self.conn.commit()  # <- то, чего не хватало в watch.py
+            other.execute(
+                "INSERT INTO sessions(session_id, last_seen) VALUES('rival', 1)"
+            )
+            other.commit()  # теперь проходит
+        finally:
+            other.close()
 
     def test_foreign_chat_is_ignored(self):
         """Чужие сообщения не попадают в базу и не порождают предупреждений."""

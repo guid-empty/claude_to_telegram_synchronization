@@ -107,6 +107,28 @@ def ingest(conn, token, chat_id):
     stored_max = 0
     new_count = 0
 
+    # Вложения скачиваем ДО записи, а не по ходу цикла.
+    #
+    # download_file ходит в сеть с таймаутом до 30 секунд, а первая же вставка
+    # открывает транзакцию SQLite — значит скачивание внутри цикла держало
+    # общую базу заблокированной все эти секунды. Соседние сессии (у каждой
+    # свой watcher, пишущий в тот же файл) ждали блокировку 15 секунд по
+    # busy_timeout и падали с «database is locked»: доставка сообщений
+    # прерывалась из-за одной картинки. Теперь сеть отработана заранее, а под
+    # транзакцией остаются только быстрые INSERT'ы.
+    media_by_uid = {}
+    for u in updates:
+        msg = u.get("message") or {}
+        if str(msg.get("chat", {}).get("id", "")) != chat_id:
+            continue
+        if str(msg.get("from", {}).get("id", "")) != chat_id:
+            continue
+        file_id = _attachment_file_id(msg)
+        if file_id:
+            media_by_uid[u["update_id"]] = common.download_file(
+                token, file_id, str(u["update_id"])
+            )
+
     # Список читается один раз на прогон: он не меняется, пока мы разбираем
     # пачку, а на каждое сообщение это был бы лишний запрос.
     known = db.known_sessions(conn, now)
@@ -155,10 +177,7 @@ def ingest(conn, token, chat_id):
                 owner = "unrouted"
                 problem = "untagged"
 
-        media_path = None
-        file_id = _attachment_file_id(msg)
-        if file_id:
-            media_path = common.download_file(token, file_id, str(uid))
+        media_path = media_by_uid.get(uid)
 
         if db.store(conn, uid, owner, clean if clean else text, msg.get("date"), now,
                     media_path, group_id):

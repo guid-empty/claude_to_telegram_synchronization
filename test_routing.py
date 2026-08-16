@@ -84,6 +84,63 @@ class RoutingTest(unittest.TestCase):
         ).fetchone()
         return row[0] if row else None
 
+    def _photo_update(self, uid, caption):
+        """Апдейт с фотографией — у неё текст лежит в caption."""
+        return {
+            "update_id": uid,
+            "message": {
+                "chat": {"id": int(CHAT)},
+                "from": {"id": int(CHAT)},
+                "caption": caption,
+                "date": int(time.time()),
+                "photo": [{"file_id": f"f{uid}", "file_size": 100}],
+            },
+        }
+
+    # --- удержание блокировки ----------------------------------------------
+
+    def test_attachments_downloaded_before_any_write(self):
+        """Скачивание вложений обязано идти ДО первой записи в базу.
+
+        download_file ходит в сеть с таймаутом до 30 секунд, а первый INSERT
+        открывает транзакцию SQLite. Скачивание внутри цикла записи держало
+        общую базу заблокированной всё это время, и watcher'ы соседних сессий
+        падали с «database is locked», теряя доставку. Порядок вызовов —
+        единственное, что отличает рабочий вариант от сломанного, поэтому он
+        и проверяется.
+        """
+        order = []
+
+        def fake_download(token, file_id, dest_stem, http_timeout=30):
+            order.append(f"download:{dest_stem}")
+            return f"/tmp/{dest_stem}.jpg"
+
+        real_store = db.store
+
+        def spy_store(conn, uid, *args, **kwargs):
+            order.append(f"store:{uid}")
+            return real_store(conn, uid, *args, **kwargs)
+
+        db.touch_session(self.conn, "alpha")
+        self.conn.commit()
+
+        with mock.patch.object(common, "download_file", fake_download), \
+             mock.patch.object(ingest_mod.common, "download_file", fake_download), \
+             mock.patch.object(db, "store", spy_store), \
+             mock.patch.object(ingest_mod.db, "store", spy_store):
+            self.run_ingest([
+                self._photo_update(701, "$alpha первая"),
+                self._photo_update(702, "$alpha вторая"),
+            ])
+
+        downloads = [i for i, step in enumerate(order) if step.startswith("download:")]
+        stores = [i for i, step in enumerate(order) if step.startswith("store:")]
+        self.assertTrue(downloads and stores, f"ожидались оба вида шагов: {order}")
+        self.assertLess(
+            max(downloads), min(stores),
+            f"скачивание должно завершиться до первой записи, порядок: {order}",
+        )
+
     # --- реестр сессий -----------------------------------------------------
 
     def test_touch_and_known(self):

@@ -83,9 +83,14 @@ def main():
     if args.done:
         conn = db.get_conn()
         db.init(conn)
-        closed = db.close_in_progress(conn, args.session)
+        closed, done_message_ids = db.close_in_progress(conn, args.session)
         conn.commit()
         conn.close()
+        # 👍 «готово» — на тех сообщениях, что были взяты в работу. После
+        # закрытия базы: сеть под открытым соединением уже стоила нам
+        # «database is locked» у соседних сессий.
+        for message_id in done_message_ids:
+            common.set_reaction(token, chat_id, message_id, common.REACTION_DONE)
         print(f"закрыто запросов: {closed}")
 
 

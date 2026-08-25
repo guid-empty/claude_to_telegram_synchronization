@@ -35,6 +35,7 @@ def _update(uid, text, date=None):
         "message": {
             "chat": {"id": int(CHAT)},
             "from": {"id": int(CHAT)},
+            "message_id": uid * 10,  # у реального апдейта id сообщения свой
             "text": text,
             "date": date or int(time.time()),
         },
@@ -296,6 +297,111 @@ class RoutingTest(unittest.TestCase):
         self.run_ingest([alien])
         self.assertIsNone(self.owner_of(12))
         self.assertEqual(self.sent, [])
+
+
+class ReactionTest(unittest.TestCase):
+    """Реакции-статусы на сообщениях владельца (👀 → ✍ → 👍).
+
+    Своя фикстура, а не наследование от RoutingTest: наследник прогнал бы весь
+    его набор ещё раз, и число тестов росло бы при каждом новом классе.
+    """
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.patch_db = mock.patch.object(db, "DB_PATH", self.db_path)
+        self.patch_db.start()
+        self.conn = db.get_conn()
+        db.init(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+        self.patch_db.stop()
+        os.unlink(self.db_path)
+
+    def run_ingest(self, updates):
+        def fake_request(token, method, params=None, http_timeout=20):
+            if method == "getUpdates":
+                if (params or {}).get("offset", 0) > 0:
+                    return {"ok": True, "result": []}
+                return {"ok": True, "result": updates}
+            return {"ok": True, "result": {}}
+
+        with mock.patch.object(common, "telegram_request", fake_request), \
+             mock.patch.object(ingest_mod.common, "telegram_request", fake_request), \
+             mock.patch.object(common, "send_message", lambda *a, **k: "plain"), \
+             mock.patch.object(ingest_mod.common, "send_message", lambda *a, **k: "plain"):
+            return ingest_mod.ingest(self.conn, "token", CHAT)
+
+    def test_message_id_is_stored(self):
+        """Без message_id реакцию ставить не на что — он обязан сохраняться."""
+        db.touch_session(self.conn, "alpha")
+        self.conn.commit()
+        self.run_ingest([_update(1, "задача $alpha")])
+
+        row = self.conn.execute(
+            "SELECT message_id FROM messages WHERE update_id=1"
+        ).fetchone()
+        self.assertEqual(row[0], 10)
+
+    def test_inbox_returns_message_id(self):
+        """inbox отдаёт message_id — иначе доставка не сможет пометить ✍."""
+        db.touch_session(self.conn, "alpha")
+        self.conn.commit()
+        self.run_ingest([_update(2, "вопрос $alpha")])
+
+        rows = db.inbox(self.conn, "alpha")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(rows[0]), 4, "форма строки: update_id, text, media, message_id")
+        self.assertEqual(rows[0][3], 20)
+
+    def test_close_in_progress_returns_ids_to_mark_done(self):
+        """notify --done ставит 👍 по этим id, поэтому их надо ВЕРНУТЬ."""
+        db.touch_session(self.conn, "alpha")
+        self.conn.commit()
+        self.run_ingest([_update(3, "работа $alpha")])
+        db.mark(self.conn, 3, "in_progress")
+        self.conn.commit()
+
+        closed, message_ids = db.close_in_progress(self.conn, "alpha")
+        self.assertEqual(closed, 1)
+        self.assertEqual(message_ids, [30])
+
+    def test_close_in_progress_skips_rows_without_message_id(self):
+        """Строки, записанные до миграции, id не имеют — их нужно пропустить,
+        иначе в API уйдёт None и запрос упадёт."""
+        self.conn.execute(
+            "INSERT INTO messages(update_id, session_id, text, tg_date, received_at,"
+            " status) VALUES(4,'alpha','старая',0,0,'in_progress')"
+        )
+        self.conn.commit()
+
+        closed, message_ids = db.close_in_progress(self.conn, "alpha")
+        self.assertEqual(closed, 1)
+        self.assertEqual(message_ids, [])
+
+    def test_reaction_is_skipped_without_message_id(self):
+        """set_reaction на пустом id не должен ходить в сеть."""
+        calls = []
+
+        def fake_request(token, method, params=None, http_timeout=20):
+            calls.append(method)
+            return {"ok": True, "result": {}}
+
+        with mock.patch.object(common, "telegram_request", fake_request):
+            self.assertFalse(common.set_reaction("t", CHAT, None, common.REACTION_READ))
+            self.assertEqual(calls, [])
+
+            self.assertTrue(common.set_reaction("t", CHAT, 42, common.REACTION_READ))
+            self.assertEqual(calls, ["setMessageReaction"])
+
+    def test_reaction_failure_is_swallowed(self):
+        """Отказ API по реакции не должен ронять доставку."""
+        def boom(token, method, params=None, http_timeout=20):
+            raise RuntimeError("REACTION_INVALID")
+
+        with mock.patch.object(common, "telegram_request", boom):
+            self.assertFalse(common.set_reaction("t", CHAT, 42, "\u2705"))
 
 
 if __name__ == "__main__":

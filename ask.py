@@ -37,7 +37,7 @@ def main():
     db.init(conn)
 
     # Ignore anything already waiting from before the question was asked.
-    for update_id, _, _ in db.inbox(conn, args.session):
+    for update_id, _, _, _ in db.inbox(conn, args.session):
         db.mark(conn, update_id, "read")
     conn.commit()
 
@@ -51,10 +51,12 @@ def main():
         ingest(conn, token, chat_id)
         rows = db.inbox(conn, args.session)
         if rows:
-            update_id, text, media_path = rows[0]
+            update_id, text, media_path, message_id = rows[0]
             db.mark(conn, update_id, "read")
             conn.commit()
             conn.close()
+            # Ответ на вопрос сразу закрывает запрос — 👍 без промежуточного ✍.
+            common.set_reaction(token, chat_id, message_id, common.REACTION_DONE)
             if text:
                 print(text)
             if media_path:

@@ -59,7 +59,9 @@ def init(conn):
     # Added later for attachments; ALTER on an existing inbox rather than a
     # rebuild, so a DB created by an older version keeps its pending messages.
     existing = {r[1] for r in conn.execute("PRAGMA table_info(messages)")}
-    for column in ("media_path TEXT", "media_group_id TEXT"):
+    # message_id — id САМОГО сообщения, не апдейта: только по нему
+    # ставится реакция (setMessageReaction). update_id для этого не годится.
+    for column in ("media_path TEXT", "media_group_id TEXT", "message_id INTEGER"):
         if column.split()[0] not in existing:
             conn.execute(f"ALTER TABLE messages ADD COLUMN {column}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sess_status ON messages(session_id, status, update_id)")
@@ -105,13 +107,16 @@ def known_sessions(conn, now_epoch=None, max_age_sec=KNOWN_SESSION_AGE_SEC):
     return [r[0] for r in cur.fetchall()]
 
 
-def store(conn, update_id, session_id, text, tg_date, received_at, media_path=None, media_group_id=None):
+def store(conn, update_id, session_id, text, tg_date, received_at, media_path=None,
+          media_group_id=None, message_id=None):
     """Idempotent insert (dedup by update_id). Returns True if a new row was added."""
     cur = conn.execute(
         "INSERT OR IGNORE INTO messages"
-        "(update_id, session_id, text, tg_date, received_at, media_path, media_group_id)"
-        " VALUES(?,?,?,?,?,?,?)",
-        (update_id, session_id, text, tg_date, received_at, media_path, media_group_id),
+        "(update_id, session_id, text, tg_date, received_at, media_path, media_group_id,"
+        " message_id)"
+        " VALUES(?,?,?,?,?,?,?,?)",
+        (update_id, session_id, text, tg_date, received_at, media_path, media_group_id,
+         message_id),
     )
     return cur.rowcount > 0
 
@@ -137,7 +142,7 @@ def owner_of_media_group(conn, media_group_id):
 def inbox(conn, session_id):
     """Unprocessed messages for this session, in arrival order."""
     cur = conn.execute(
-        "SELECT update_id, text, media_path FROM messages"
+        "SELECT update_id, text, media_path, message_id FROM messages"
         " WHERE session_id=? AND status='not_processed' ORDER BY update_id",
         (session_id,),
     )
@@ -147,15 +152,27 @@ def inbox(conn, session_id):
 def close_in_progress(conn, session_id):
     """Пометить взятые в работу сообщения сессии как обработанные.
 
-    Возвращает число закрытых. Трогает только СВОЮ сессию: у каждой свой
-    рабочий цикл, и чужие незакрытые задачи закрывать нельзя.
+    Возвращает (число закрытых, message_id закрытых). Вторым значением
+    пользуется notify: по нему на исходных сообщениях владельца ставится
+    реакция «готово». Собираем id ДО UPDATE — после него строки уже не
+    отберутся по status='in_progress'.
+
+    Трогает только СВОЮ сессию: у каждой свой рабочий цикл, и чужие
+    незакрытые задачи закрывать нельзя.
     """
+    message_ids = [
+        r[0] for r in conn.execute(
+            "SELECT message_id FROM messages"
+            " WHERE session_id=? AND status='in_progress' AND message_id IS NOT NULL",
+            (session_id,),
+        )
+    ]
     cur = conn.execute(
         "UPDATE messages SET status='read'"
         " WHERE session_id=? AND status='in_progress'",
         (session_id,),
     )
-    return cur.rowcount
+    return cur.rowcount, message_ids
 
 
 def mark(conn, update_id, status):

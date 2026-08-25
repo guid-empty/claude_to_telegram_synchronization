@@ -94,7 +94,7 @@ def main():
             # поэтому параллельные сессии друг другу не мешают.
             ingest(conn, token, chat_id)
 
-            for update_id, text, media_path in db.inbox(conn, args.session):
+            for update_id, text, media_path, message_id in db.inbox(conn, args.session):
                 if text:
                     emit(text)
                 # Картинку через stdout не передать — отдаём путь, его открывают
@@ -102,6 +102,8 @@ def main():
                 if media_path:
                     emit(f"[image: {media_path}]")
                 db.mark(conn, update_id, "in_progress" if args.defer_read else "read")
+                # ✍ «взял в работу»: сообщение ушло в сессию.
+                common.set_reaction(token, chat_id, message_id, common.REACTION_WORKING)
             conn.commit()
             conn.close()
             failures = 0

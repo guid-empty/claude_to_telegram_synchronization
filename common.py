@@ -122,6 +122,39 @@ def strip_html(text):
     return plain.strip()
 
 
+# Статусы обработки, которые бот вешает НА сообщение владельца.
+#
+# Набор эмодзи для реакций у ботов фиксирован Telegram, и галочки в нём НЕТ:
+# ✅, ☑️ и ✔️ отклоняются как REACTION_INVALID (проверено живым API 25.08.2026).
+# Поэтому «готово» — 👍, выбор владельца.
+REACTION_READ = "\U0001F440"     # 👀 сообщение попало в инбокс
+REACTION_WORKING = "\u270D"      # ✍ сессия взяла в работу
+REACTION_DONE = "\U0001F44D"     # 👍 сессия отчиталась
+
+
+def set_reaction(token, chat_id, message_id, emoji):
+    """Повесить реакцию на сообщение владельца. Пустой emoji — снять.
+
+    Best-effort: реакция — украшение статуса, и её отказ не должен стоить нам
+    доставки. Поэтому любые ошибки гасятся, а вызывающий продолжает работу.
+
+    Одновременно у бота может висеть ровно ОДНА реакция на сообщение: две
+    сразу Telegram отклоняет (REACTIONS_TOO_MANY), поэтому лестница
+    👀 → ✍ → 👍 работает перезаписью.
+    """
+    if not message_id:
+        return False  # строки, записанные до появления колонки message_id
+    try:
+        payload = [{"type": "emoji", "emoji": emoji}] if emoji else []
+        result = telegram_request(
+            token, "setMessageReaction",
+            {"chat_id": chat_id, "message_id": message_id, "reaction": payload},
+        )
+        return bool(result.get("ok"))
+    except Exception:
+        return False
+
+
 def download_file(token, file_id, dest_stem, http_timeout=30):
     """Resolve a Telegram file_id and save it under MEDIA_DIR as <dest_stem>.<ext>.
 

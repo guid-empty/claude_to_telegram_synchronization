@@ -106,6 +106,7 @@ def ingest(conn, token, chat_id):
     now = int(time.time())
     stored_max = 0
     new_count = 0
+    to_react = []
 
     # Вложения скачиваем ДО записи, а не по ходу цикла.
     #
@@ -180,8 +181,14 @@ def ingest(conn, token, chat_id):
         media_path = media_by_uid.get(uid)
 
         if db.store(conn, uid, owner, clean if clean else text, msg.get("date"), now,
-                    media_path, group_id):
+                    media_path, group_id, msg.get("message_id")):
             new_count += 1
+            # Реакцию ставим ТОЛЬКО на новые строки: иначе каждый повторный
+            # прогон дёргал бы API по уже отмеченным сообщениям. Копим здесь,
+            # а шлём после commit — сеть внутри транзакции уже однажды роняла
+            # соседей на «database is locked» (см. комментарий в db.get_conn).
+            if msg.get("message_id"):
+                to_react.append(msg["message_id"])
             # Считаем только НОВЫЕ строки: иначе одно и то же сообщение
             # порождало бы предупреждение на каждом последующем прогоне.
             if problem == "unknown_tag":
@@ -194,6 +201,10 @@ def ingest(conn, token, chat_id):
     conn.commit()
     db.prune(conn, now)
     conn.commit()
+
+    # 👀 «сообщение принято»: транзакция уже закрыта, база свободна.
+    for message_id in to_react:
+        common.set_reaction(token, chat_id, message_id, common.REACTION_READ)
 
     # Confirm/drain everything we just processed (stored or intentionally ignored).
     if stored_max > 0:

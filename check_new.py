@@ -87,7 +87,7 @@ def main():
     rows = db.inbox(conn, args.session)
     if rows:
         backoff = {"level": 0, "empty_streak": 0}  # message arrived -> poll fast again
-        for update_id, text, media_path in rows:
+        for update_id, text, media_path, message_id in rows:
             if text:
                 print(text)
             # stdout can't carry an image, so hand over the path — the caller is
@@ -95,6 +95,9 @@ def main():
             if media_path:
                 print(f"[image: {media_path}]")
             db.mark(conn, update_id, "in_progress" if args.defer_read else "read")
+            # ✍ «взял в работу» — на исходном сообщении владельца. Сообщение
+            # доставлено модели, дальше отвечает уже сессия.
+            common.set_reaction(token, chat_id, message_id, common.REACTION_WORKING)
         conn.commit()
     else:
         backoff["empty_streak"] += 1

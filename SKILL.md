@@ -179,19 +179,34 @@ Now `ingest.py` checks the tag against a registry of live sessions (table `sessi
 - **unknown tag** — names it, suggests the closest live session (`difflib`, so `intergation` → `integration`),
   and lists the active ones. The message is still stored under the tag as typed: if a session with that name
   shows up later, it collects it. A warning is a hint, not a rejection.
+- **no tag, continuation of a split message** — delivered to the same session as the part before it. The
+  Telegram client cuts anything over 4096 characters into several messages and puts the tag only in the
+  first, so the rest used to land in `unrouted` and reach nobody, while the sender saw everything delivered.
+  The signal is strict — the previous message nearly hit the limit *and* carries the same `tg_date` — because
+  no human types four thousand characters and another message inside the same second.
+- **no tag, right after a tagged message** — inherits that addressee for 5 minutes (a screenshot sent
+  after the request, an "ok", a correction). This one is a guess, so it is announced in the bot: if the
+  addressee was someone else, the tag fixes it.
 - **no tag, exactly one live session** — delivered to it. There is no ambiguity to resolve, and refusing
   would be pedantry.
-- **no tag, several live sessions** — stays `unrouted`, and the bot asks for a tag, listing the candidates.
+- **no tag, nothing to infer from** — stays `unrouted`, and the bot asks for a tag, listing the candidates.
   Guessing here is worse than not delivering: the wrong session would start doing work that isn't its own.
 
 Warnings are raised only for **newly stored** rows and aggregated into **one message per ingest run** —
 `ingest` runs every 15 seconds under `monitor`, so a warning tied to the message rather than to its novelty
 would turn help into a spam feed. Covered by `test_routing.py`.
 
-**Images.** A picture sent with a caption is routed by the tag in that caption, downloaded into `media/`, and
-delivered as a line `[image: /abs/path.jpg]` after the text. **Open that path with the `Read` tool** — stdout
-cannot carry a picture, so the path is the only way you actually see it; treat it as part of the message, not
-as a file reference to mention back. Both compressed photos and images sent as files are handled. An album
+**Attachments.** Anything sent with a caption is routed by the tag in that caption, downloaded into `media/`,
+and delivered after the text — a picture as `[image: /abs/path.jpg]`, any other file as `[файл: /abs/path]`.
+**Open an image path with the `Read` tool** — stdout cannot carry a picture, so the path is the only way you
+actually see it; treat it as part of the message, not as a file reference to mention back. A `[файл: …]` is
+an ordinary file on disk: read it however the task needs (Read, a script, jq).
+
+Files keep their original name (`379653057-getSurveyInfo.json`) so they stay recognisable on disk, prefixed
+with the update id so two files called `data.json` never overwrite each other. Documents used to be taken
+only when their mime type started with `image/`, and a json sent to a session arrived as an EMPTY message:
+the sender saw it delivered while the work it was meant to unblock stalled. Photos, documents, audio, video
+and voice are all handled now. An album
 arrives as one update per picture with the caption on the first only, so the rest inherit the owner via
 `media_group_id` — expect several `[image: …]` lines under a single caption. A download that fails is
 skipped, never costing the message itself.
@@ -257,6 +272,14 @@ first quote or newline.
 | `html` | `sendMessage` + `parse_mode=HTML` | `<b> <i> <u> <s> <code> <pre> <a>`, `<tg-spoiler>`, `<blockquote>`, `<blockquote expandable>` |
 | `rich` | `sendRichMessage` (Bot API 10.1) | all of the above **plus** `<h1>`–`<h6>`, real `<table>`, `<ul>/<ol>`, `<details>`, `<mark>`, `<tg-collage>`, `<tg-slideshow>` |
 
+**Length is handled for you, but the limits differ by an order of magnitude.** `sendMessage` rejects
+anything over **4096** characters with `message is too long` — it does not truncate, it refuses, so a long
+report used to vanish entirely rather than arrive clipped. `sendRichMessage` takes **20000** (40000 comes
+back as `RICH_MESSAGE_TEXT_TOO_LONG`) — both figures measured against the live API, not read off the docs.
+`send_message` now splits on line boundaries before sending, and a `rich` message that falls back to `html`
+is re-split for the smaller limit. Practical consequence: a long report should go out as `rich` — it stays
+one message instead of four.
+
 **Tables and headings only exist in `rich`.** Classic HTML rejects them outright — `Unsupported start tag
 "table"` — so a report built on `<table>` must go out as `rich`, not `html`.
 
@@ -281,6 +304,48 @@ bury the summary. Conclusion in the open, reasoning inside.
 Formatting degrades instead of failing: rejected `rich` retries as `html`, rejected `html` retries as
 plain text with tags stripped. `notify.py` prints `формат понижен: rich → html` when that happens, so a
 silently uglier report is still visible as a downgrade rather than guessed at from the phone.
+
+## Publishing a post to a channel (and its discussion thread)
+
+Posting to a channel is not the same as messaging a person, and every step below cost a live
+debugging round — none of it is guesswork.
+
+**The bot must be a member of the channel.** `getChat` succeeds for any public channel, so it proves
+nothing; posting returns `Forbidden: bot is not a member of the channel chat`. Check by trying, not by
+reading `getChat`.
+
+**Images in `<tg-collage>`/`<tg-slideshow>` must be URLs Telegram can fetch itself.**
+
+- `file_id` of an already-uploaded photo is rejected: `RICH_MESSAGE_PHOTO_URL_INVALID` — the galleries
+  take URLs only.
+- A URL Telegram cannot reach gives `RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND`. The two errors are different
+  on purpose: the first means "wrong kind of reference", the second "could not download it".
+- Some origins are unreachable *from Telegram's servers* while being perfectly public from your own
+  machine — `curl` returning 200 proves nothing about what Telegram sees. Host post images on object
+  storage (S3 and friends) or on a CDN, and verify by actually sending the message.
+
+**Comments live in a different chat than the post.** A channel comment is a message in the linked
+discussion group, replying to the *automatic copy* of the post that Telegram forwards there. The copy has
+its **own message_id**, unrelated to the post's: post `737` in the channel appeared as `1601` in the group.
+Replying with the channel's id fails with `message to be replied not found`.
+
+**The bot must be an ADMIN of the discussion group, not just a member.** This is the trap that eats the
+most time: to a non-admin bot an invisible message and a missing one look identical — both answer
+`message to be replied not found`. With admin rights the same id resolves immediately, and
+`reply_to_message` then carries `is_automatic_forward: true` and `forward_origin.message_id` pointing at
+the channel post.
+
+**Finding the copy's id without `getUpdates`.** Never call `getUpdates` on a bot that runs on a webhook —
+it deletes the webhook and takes production down with it. Instead, send a throwaway message to the group
+to learn the current id ceiling, then walk downwards replying to each candidate: the right one answers
+with `forward_origin.message_id` equal to your post's id. Delete every probe afterwards. A cheaper
+alternative, if the session can afford to wait, is a bot without a webhook that sits in the group and
+reads updates normally.
+
+**Thread membership is verifiable.** Every published comment returns `message_thread_id`; if it equals the
+copy's id, the comment really is under the post. If it is `None` or some other value, the message landed
+in the group's general chat instead — visible to people, but not as a comment. Check the field rather than
+asking someone to look at the app.
 
 ## Just notify (no reply expected)
 
@@ -391,6 +456,31 @@ git worktree add .claude/worktrees/<session_id>-<YYYY-MM-DD> \
 
 The prefix is what makes a stray worktree identifiable months later: it says which session created it and
 when, without opening a single file.
+
+**Branch off `origin/main`, and never adopt a branch you did not create.** A background session usually
+starts by being pointed at some existing worktree, and it is tempting to just commit there. Don't: that
+branch may already belong to another session running right now. On 2026-08-28 two sessions spent a day
+committing into the same branch *and the same directory* — one session's PR ended up containing the other's
+entire feature, and nothing broke only because their edits happened to land in different files.
+
+Two consequences, both expensive:
+
+- **You cannot merge your own work** without dragging in someone else's unfinished changes.
+- **You cannot deploy**, where the deploy script checks the checkout against `origin/main` — a shared build
+  directory on the server means your branch state would be handed to the next session.
+
+So at the start of the session, create your own:
+
+```bash
+git fetch origin main
+git worktree add .claude/worktrees/<session_id>-<YYYY-MM-DD> \
+  -b worktree-<session_id>-<YYYY-MM-DD> origin/main
+```
+
+If you discover mid-session that you are sitting in a shared branch: **do not merge it**. Create your own
+branch from `origin/main` and cherry-pick only your commits across, leaving the other session's branch and
+PR untouched. Check who else is around first — `git log --format='%h %s' origin/main..HEAD` shows commits
+you did not write, and an open PR on that branch names its real owner.
 
 ## Security
 

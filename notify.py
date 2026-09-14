@@ -50,6 +50,7 @@ def main():
             text = f.read()
 
     config = common.load_config()
+    token, chat_id = config["token"], str(config["chat_id"])
 
     # Регистрируем сессию до отправки. Это важно именно здесь: включение
     # фонового режима начинается с notify «Фоновый режим включён», то есть к
@@ -70,9 +71,7 @@ def main():
     else:
         body = f"{head} {text}"
 
-    used = common.send_message(
-        config["token"], str(config["chat_id"]), body, mode=args.format
-    )
+    used = common.send_message(token, chat_id, body, mode=args.format)
     # Печатаем реально применённый формат: если rich не прошёл и сообщение
     # ушло html/plain, об этом надо знать, а не гадать по виду в телефоне.
     if used != args.format:

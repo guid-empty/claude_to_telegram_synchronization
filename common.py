@@ -3,6 +3,8 @@
 import json
 import os
 import re
+import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -12,7 +14,22 @@ MEDIA_DIR = os.path.join(SCRIPT_DIR, "media")
 
 # A routing tag is a word starting with "$": "$my-session done" routes to session
 # "my-session". Session ids may contain letters, digits, underscores and hyphens.
-TAG_RE = re.compile(r"(?<!\S)\$([A-Za-z0-9_\-]+)")
+TAG_RE = re.compile(r"(?<!\S)\$([A-Za-z0-9_\-\u0400-\u04FF]+)")
+
+# ЙЦУКЕН → QWERTY: тег, набранный в русской раскладке. В инбоксе лежит живой
+# пример — «$Ы6 оплата прошла», то есть $S6, не дошедшее ни до кого: старая
+# регулярка кириллицу вообще не видела, и сообщение считалось безадресным.
+_LAYOUT = str.maketrans(
+    "йцукенгшщзхъфывапролджэячсмитьбю"
+    "ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ",
+    "qwertyuiop[]asdfghjkl;'zxcvbnm,."
+    "QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>",
+)
+
+
+def layout_fix(text):
+    """Тот же текст, как если бы его набрали в латинской раскладке."""
+    return (text or "").translate(_LAYOUT)
 
 
 def load_config():
@@ -38,6 +55,46 @@ def telegram_request(token, method, params=None, http_timeout=20):
         return json.loads(resp.read().decode())
 
 
+# Лимиты длины одного сообщения. Значения не из документации, а из живого
+# API (27.08.2026): sendMessage отвечает «message is too long» уже на 5011
+# символов, sendRichMessage принимает 20000 и отклоняет 40000 с
+# RICH_MESSAGE_TEXT_TOO_LONG. Берём проверенные значения, а не границу.
+PLAIN_LIMIT = 4096
+RICH_LIMIT = 20000
+
+
+def split_for_send(text, limit):
+    """Разбить текст на куски не длиннее limit, по границам строк.
+
+    Резать нужно ДО отправки, а не надеяться на Telegram: длинное сообщение он
+    не обрезает, а отклоняет с 400 — и отчёт пропадает целиком. Границы строк
+    важнее ровной длины: разрез посреди строки рвёт таблицу или тег.
+    """
+    text = text or ""
+    if len(text) <= limit:
+        return [text]
+    chunks, cur = [], ""
+    for line in text.split("\n"):
+        # Строка сама длиннее лимита (одна простыня без переносов) — тут уже
+        # ничего не поделать, режем по символам.
+        while len(line) > limit:
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if not cur:
+            cur = line
+        elif len(cur) + 1 + len(line) <= limit:
+            cur += "\n" + line
+        else:
+            chunks.append(cur)
+            cur = line
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
 def send_message(token, chat_id, text, mode="plain"):
     """Send a status message.
 
@@ -51,7 +108,34 @@ def send_message(token, chat_id, text, mode="plain"):
     Formatting degrades instead of failing: a rejected rich message is retried
     as HTML, a rejected HTML message is retried as plain text. A report that
     arrives ugly is still a delivered report; one that errors out is lost.
+
+    Длина тоже деградирует, а не роняет отправку: текст длиннее лимита режется
+    на несколько сообщений. Возвращается формат, которым ушёл ПОСЛЕДНИЙ кусок.
     """
+    limit = RICH_LIMIT if mode == "rich" else PLAIN_LIMIT
+    used = mode
+    for chunk in split_for_send(text, limit):
+        used = _send_chunk(token, chat_id, chunk, mode)
+    return used
+
+
+def _log_downgrade(mode, exc):
+    """Причина понижения формата — в stderr. Без неё «формат понижен» не
+    отличить: битая разметка это была или сетевой чих (оба уже случались)."""
+    detail = ""
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            detail = exc.read().decode()[:300]
+        except Exception:
+            pass
+    print(
+        f"[send] {mode} не прошёл: {type(exc).__name__}: {exc} {detail}".rstrip(),
+        file=sys.stderr,
+    )
+
+
+def _send_chunk(token, chat_id, text, mode):
+    """Отправка одного куска, уже укладывающегося в лимит своего формата."""
     if mode == "rich":
         try:
             telegram_request(
@@ -59,8 +143,12 @@ def send_message(token, chat_id, text, mode="plain"):
                 {"chat_id": chat_id, "rich_message": {"html": _rich_breaks(text)}},
             )
             return "rich"
-        except Exception:
-            mode = "html"  # старый Bot API / метод недоступен
+        except Exception as e:
+            # Старый Bot API / метод недоступен. Перепосылаем через
+            # send_message, а не напрямую: html-лимит в пять раз меньше
+            # rich-овского, и кусок, законный для rich, надо перерезать.
+            _log_downgrade("rich", e)
+            return send_message(token, chat_id, text, mode="html")
 
     if mode == "html":
         try:
@@ -69,10 +157,11 @@ def send_message(token, chat_id, text, mode="plain"):
                 {"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
             )
             return "html"
-        except Exception:
+        except Exception as e:
             # Чаще всего это битая разметка (незакрытый тег, «<» в тексте).
             # Тогда сообщение важнее вёрстки — снимаем теги и шлём как есть.
-            text = strip_html(text)
+            _log_downgrade("html", e)
+            return send_message(token, chat_id, strip_html(text), mode="plain")
 
     telegram_request(token, "sendMessage", {"chat_id": chat_id, "text": text})
     return "plain"
@@ -155,11 +244,16 @@ def set_reaction(token, chat_id, message_id, emoji):
         return False
 
 
-def download_file(token, file_id, dest_stem, http_timeout=30):
-    """Resolve a Telegram file_id and save it under MEDIA_DIR as <dest_stem>.<ext>.
+def download_file(token, file_id, dest_stem, http_timeout=30, file_name=None):
+    """Resolve a Telegram file_id and save it under MEDIA_DIR.
 
-    Returns the absolute path, or None if anything fails — media is a nice-to-have,
-    so a failed download must never cost us the message itself.
+    Named "<dest_stem>-<original name>" when Telegram tells us the name, so a
+    json stays recognisable on disk; otherwise "<dest_stem><ext>". The stem
+    keeps names unique — two files called "data.json" from different messages
+    must not overwrite each other.
+
+    Returns the absolute path, or None if anything fails — an attachment is a
+    nice-to-have, so a failed download must never cost us the message itself.
     """
     try:
         info = telegram_request(token, "getFile", {"file_id": file_id}, http_timeout)
@@ -168,7 +262,9 @@ def download_file(token, file_id, dest_stem, http_timeout=30):
         remote = info["result"]["file_path"]  # e.g. "photos/file_12.jpg"
         ext = os.path.splitext(remote)[1] or ".bin"
         os.makedirs(MEDIA_DIR, exist_ok=True)
-        dest = os.path.join(MEDIA_DIR, f"{dest_stem}{ext}")
+        safe = re.sub(r"[^\w.-]+", "_", file_name).strip("_") if file_name else ""
+        dest = os.path.join(
+            MEDIA_DIR, f"{dest_stem}-{safe}" if safe else f"{dest_stem}{ext}")
         url = f"https://api.telegram.org/file/bot{token}/{remote}"
         with urllib.request.urlopen(url, timeout=http_timeout) as resp, open(dest, "wb") as f:
             f.write(resp.read())
@@ -176,6 +272,14 @@ def download_file(token, file_id, dest_stem, http_timeout=30):
     except Exception:
         return None
 
+
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic")
+
+
+def attachment_line(path):
+    """Строка доставки для вложения: картинка или файл."""
+    is_image = str(path).lower().endswith(IMAGE_EXTS)
+    return f"[image: {path}]" if is_image else f"[файл: {path}]"
 
 def find_tag(text):
     """Return the session id from the first "$tag" word in the text, or None."""

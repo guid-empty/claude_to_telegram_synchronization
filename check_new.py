@@ -93,7 +93,7 @@ def main():
             # stdout can't carry an image, so hand over the path — the caller is
             # told to open it with the Read tool and actually see the picture.
             if media_path:
-                print(f"[image: {media_path}]")
+                print(common.attachment_line(media_path))
             db.mark(conn, update_id, "in_progress" if args.defer_read else "read")
             # ✍ «взял в работу» — на исходном сообщении владельца. Сообщение
             # доставлено модели, дальше отвечает уже сессия.

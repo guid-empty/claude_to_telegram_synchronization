@@ -139,6 +139,71 @@ def owner_of_media_group(conn, media_group_id):
     return row[0] if row else None
 
 
+# Сообщение длиннее лимита Telegram клиент режет на части ~4096 символов, и
+# тег остаётся только в первой. Порог ниже лимита: у клиента он плавает
+# (граница ищется по словам), поэтому 4000 — а не 4096.
+SPLIT_MIN_LEN = 4000
+# Разрезанные части уходят одним нажатием, tg_date у них совпадает. Двух секунд
+# хватает с запасом и не даёт зацепить следующее сообщение, набранное руками.
+SPLIT_WINDOW_SEC = 2
+# Насколько давним может быть предыдущий адресат, чтобы унаследовать его для
+# сообщения без тега (картинка вдогонку, «ок», уточнение).
+RECENT_OWNER_WINDOW_SEC = 5 * 60
+
+
+def previous_message(conn, before_update_id):
+    """Предыдущее сообщение владельца: (session_id, len(text), tg_date).
+
+    Нужна и для склейки разрезанного сообщения, и для наследования адресата —
+    оба случая отвечают на один вопрос: «кому шло то, что было прямо перед».
+    """
+    cur = conn.execute(
+        "SELECT session_id, length(text), tg_date FROM messages"
+        " WHERE update_id < ? ORDER BY update_id DESC LIMIT 1",
+        (before_update_id,),
+    )
+    return cur.fetchone()
+
+
+def continuation_owner(conn, update_id, tg_date):
+    """Владелец, если это сообщение — хвост разрезанного клиентом текста.
+
+    Признак строгий и потому надёжный: предыдущее сообщение почти упёрлось в
+    лимит длины, а это пришло той же секундой. Совпадение двух условий у
+    набранных руками сообщений практически невозможно — человек не печатает
+    четыре тысячи символов и следом ещё одно сообщение за ту же секунду.
+    """
+    prev = previous_message(conn, update_id)
+    if not prev or tg_date is None:
+        return None
+    owner, prev_len, prev_date = prev
+    if owner == "unrouted" or prev_date is None:
+        return None
+    if prev_len < SPLIT_MIN_LEN:
+        return None
+    if abs(tg_date - prev_date) > SPLIT_WINDOW_SEC:
+        return None
+    return owner
+
+
+def recent_owner(conn, update_id, tg_date, known, window_sec=RECENT_OWNER_WINDOW_SEC):
+    """Адресат предыдущего сообщения, если оно было только что.
+
+    Это уже догадка, а не факт, поэтому она ограничена вдвойне: узким окном
+    и требованием, чтобы сессия была активна. Наследовать адрес у мёртвой
+    сессии — то же самое, что потерять сообщение, только молча.
+    """
+    prev = previous_message(conn, update_id)
+    if not prev or tg_date is None:
+        return None
+    owner, _prev_len, prev_date = prev
+    if owner == "unrouted" or owner not in known or prev_date is None:
+        return None
+    if tg_date - prev_date > window_sec or tg_date < prev_date:
+        return None
+    return owner
+
+
 def inbox(conn, session_id):
     """Unprocessed messages for this session, in arrival order."""
     cur = conn.execute(

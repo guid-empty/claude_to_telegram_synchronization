@@ -85,6 +85,24 @@ class RoutingTest(unittest.TestCase):
         ).fetchone()
         return row[0] if row else None
 
+    def _document_update(self, uid, caption, name="data.json",
+                         mime="application/json"):
+        """Апдейт с файлом — json, лог, архив: всё, что не картинка."""
+        return {
+            "update_id": uid,
+            "message": {
+                "chat": {"id": int(CHAT)},
+                "from": {"id": int(CHAT)},
+                "caption": caption,
+                "date": int(time.time()),
+                "document": {
+                    "file_id": f"d{uid}",
+                    "file_name": name,
+                    "mime_type": mime,
+                },
+            },
+        }
+
     def _photo_update(self, uid, caption):
         """Апдейт с фотографией — у неё текст лежит в caption."""
         return {
@@ -112,7 +130,8 @@ class RoutingTest(unittest.TestCase):
         """
         order = []
 
-        def fake_download(token, file_id, dest_stem, http_timeout=30):
+        def fake_download(token, file_id, dest_stem, http_timeout=30,
+                          file_name=None):
             order.append(f"download:{dest_stem}")
             return f"/tmp/{dest_stem}.jpg"
 
@@ -141,6 +160,43 @@ class RoutingTest(unittest.TestCase):
             max(downloads), min(stores),
             f"скачивание должно завершиться до первой записи, порядок: {order}",
         )
+
+    def test_any_document_is_downloaded_not_just_images(self):
+        """Файл любого типа доезжает до сессии.
+
+        Документы брались только с mime_type "image/*", и присланный json
+        приходил ПУСТЫМ сообщением: отправитель видел доставку, а работа,
+        которую файл должен был разблокировать, стояла.
+        """
+        saved = {}
+
+        def fake_download(token, file_id, dest_stem, http_timeout=30,
+                          file_name=None):
+            saved[dest_stem] = file_name
+            return f"/tmp/{dest_stem}-{file_name}"
+
+        db.touch_session(self.conn, "alpha")
+        self.conn.commit()
+
+        with mock.patch.object(common, "download_file", fake_download), \
+             mock.patch.object(ingest_mod.common, "download_file", fake_download):
+            self.run_ingest([
+                self._document_update(801, "$alpha вот форма"),
+            ])
+
+        self.assertEqual(saved, {"801": "data.json"},
+                         "json обязан скачаться, как и картинка")
+        rows = db.inbox(self.conn, "alpha")
+        self.assertEqual(len(rows), 1)
+        # inbox отдаёт кортежи (update_id, text, media_path, message_id).
+        media_path = rows[0][2]
+        self.assertTrue(str(media_path).endswith("data.json"),
+                        f"путь к файлу должен доехать: {media_path}")
+
+    def test_attachment_line_names_a_file_a_file(self):
+        """Картинку надо открыть, файл — прочитать; подписи разные."""
+        self.assertTrue(common.attachment_line("/x/a.jpg").startswith("[image:"))
+        self.assertTrue(common.attachment_line("/x/a.json").startswith("[файл:"))
 
     # --- реестр сессий -----------------------------------------------------
 
@@ -298,6 +354,166 @@ class RoutingTest(unittest.TestCase):
         self.assertIsNone(self.owner_of(12))
         self.assertEqual(self.sent, [])
 
+
+    # --- длинные сообщения и наследование адресата -------------------------
+
+    def test_split_message_tail_reaches_the_same_session(self):
+        """Хвост сообщения, разрезанного клиентом, идёт тому же адресату.
+
+        Telegram-клиент режет текст длиннее 4096 символов на несколько
+        сообщений и ставит тег только в первое. На живой базе это выглядело
+        как 4077 + 3805 символов с одним и тем же tg_date, где вторая половина
+        оседала в unrouted и не доходила ни до кого. Ловится только здесь:
+        отправитель видит оба сообщения доставленными.
+        """
+        db.touch_session(self.conn, "alpha")
+        db.touch_session(self.conn, "beta")
+        self.conn.commit()
+        stamp = int(time.time())
+        head = "$alpha " + "x" * 4070
+        self.run_ingest([
+            _update(801, head, date=stamp),
+            _update(802, "y" * 3800, date=stamp),
+        ])
+        self.assertEqual(self.owner_of(801), "alpha")
+        self.assertEqual(self.owner_of(802), "alpha")
+
+    def test_short_previous_is_not_treated_as_split(self):
+        """Короткое предыдущее — это не разрезанный текст, а просто сообщение.
+
+        Разделять важно: склейка опирается на длину, и без этой проверки любое
+        сообщение, отправленное следом, считалось бы продолжением.
+        """
+        db.touch_session(self.conn, "alpha")
+        self.conn.commit()
+        stamp = int(time.time())
+        self.run_ingest([_update(811, "$alpha коротко", date=stamp)])
+        self.assertIsNone(
+            db.continuation_owner(self.conn, 812, stamp),
+            "короткое сообщение не должно выглядеть как разрезанное",
+        )
+
+    def test_untagged_right_after_tagged_inherits_owner(self):
+        """Картинка вдогонку без тега уходит туда же, куда шло сообщение перед ней."""
+        db.touch_session(self.conn, "alpha")
+        db.touch_session(self.conn, "beta")
+        self.conn.commit()
+        stamp = int(time.time())
+        self.run_ingest([
+            _update(821, "$alpha посмотри скрин", date=stamp),
+            _update(822, "вот он", date=stamp + 5),
+        ])
+        self.assertEqual(self.owner_of(822), "alpha")
+        self.assertTrue(any("alpha" in s for s in self.sent),
+                        f"о догадке нужно сообщить в чат: {self.sent}")
+
+    def test_inheritance_expires(self):
+        """Спустя окно адресат не наследуется — иначе догадка станет наглой."""
+        db.touch_session(self.conn, "alpha")
+        db.touch_session(self.conn, "beta")
+        self.conn.commit()
+        stamp = int(time.time())
+        self.run_ingest([_update(831, "$alpha давняя задача", date=stamp)])
+        self.run_ingest([
+            _update(831, "$alpha давняя задача", date=stamp),
+            _update(832, "не связано", date=stamp + db.RECENT_OWNER_WINDOW_SEC + 60),
+        ])
+        self.assertEqual(self.owner_of(832), "unrouted")
+
+    def test_inheritance_only_from_a_live_session(self):
+        """Наследовать адрес мёртвой сессии — та же потеря, только молча."""
+        db.touch_session(self.conn, "beta")
+        db.touch_session(self.conn, "gamma")
+        self.conn.commit()
+        stamp = int(time.time())
+        self.run_ingest([
+            _update(841, "$dead уже не работает", date=stamp),
+            _update(842, "продолжение мысли", date=stamp + 3),
+        ])
+        self.assertEqual(self.owner_of(842), "unrouted")
+
+    # --- длина исходящих ----------------------------------------------------
+
+    def test_split_for_send_keeps_every_chunk_within_limit(self):
+        """Куски укладываются в лимит и вместе дают исходный текст.
+
+        Проверено живым API: sendMessage отклоняет 5011 символов с
+        «message is too long», то есть длинный отчёт не приходил укороченным —
+        он не приходил вовсе.
+        """
+        text = "\n".join(f"строка {i} " + "z" * 100 for i in range(200))
+        chunks = common.split_for_send(text, common.PLAIN_LIMIT)
+        self.assertGreater(len(chunks), 1)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), common.PLAIN_LIMIT)
+        self.assertEqual("\n".join(chunks), text)
+
+    def test_split_for_send_handles_one_endless_line(self):
+        """Строка без переносов длиннее лимита режется по символам, а не роняет отправку."""
+        chunks = common.split_for_send("q" * 10000, common.PLAIN_LIMIT)
+        self.assertEqual("".join(chunks), "q" * 10000)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), common.PLAIN_LIMIT)
+
+    def test_long_plain_message_goes_out_in_parts(self):
+        calls = []
+
+        def fake_request(token, method, params=None, http_timeout=20):
+            calls.append((method, params))
+            return {"ok": True, "result": {}}
+
+        with mock.patch.object(common, "telegram_request", fake_request):
+            common.send_message("t", CHAT, "w" * 9000, mode="plain")
+        self.assertEqual(len(calls), 3, f"9000 символов = три сообщения: {len(calls)}")
+        for _method, params in calls:
+            self.assertLessEqual(len(params["text"]), common.PLAIN_LIMIT)
+
+    def test_rich_rejection_recuts_chunk_for_html_limit(self):
+        """Кусок, законный для rich, при откате на html обязан быть перерезан.
+
+        Лимиты различаются впятеро (20000 против 4096), поэтому простой
+        перепосыл того же куска другим методом снова упёрся бы в «too long» —
+        и деградация формата, задуманная как страховка, теряла бы сообщение.
+        """
+        sent = []
+
+        def fake_request(token, method, params=None, http_timeout=20):
+            if method == "sendRichMessage":
+                raise RuntimeError("метод недоступен")
+            sent.append(params["text"])
+            return {"ok": True, "result": {}}
+
+        with mock.patch.object(common, "telegram_request", fake_request):
+            common.send_message("t", CHAT, "e" * 12000, mode="rich")
+        self.assertTrue(sent)
+        for text in sent:
+            self.assertLessEqual(len(text), common.PLAIN_LIMIT)
+        self.assertEqual(len("".join(sent)), 12000)
+
+
+    def test_russian_layout_tag_is_repaired(self):
+        """$Ы6 — это $S6, набранное не в той раскладке.
+
+        В живом инбоксе такое сообщение («$Ы6 оплата прошла») пролежало
+        недоставленным: старая регулярка кириллицу не видела вовсе, поэтому
+        оно считалось безадресным.
+        """
+        db.touch_session(self.conn, "S6")
+        db.touch_session(self.conn, "T6")
+        self.conn.commit()
+        self.run_ingest([_update(851, "$\u042b6 оплата прошла")])
+        self.assertEqual(self.owner_of(851), "S6")
+        row = self.conn.execute(
+            "SELECT text FROM messages WHERE update_id=851").fetchone()
+        self.assertEqual(row[0], "оплата прошла")
+
+    def test_russian_word_after_dollar_is_not_a_tag(self):
+        """«$Проверь …» — не адрес: перевод раскладки ни с чем не совпал."""
+        db.touch_session(self.conn, "S6")
+        db.touch_session(self.conn, "T6")
+        self.conn.commit()
+        self.run_ingest([_update(861, "$Проверь очередь платежей")])
+        self.assertEqual(self.owner_of(861), "unrouted")
 
 class ReactionTest(unittest.TestCase):
     """Реакции-статусы на сообщениях владельца (👀 → ✍ → 👍).

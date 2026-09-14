@@ -100,7 +100,7 @@ def main():
                 # Картинку через stdout не передать — отдаём путь, его открывают
                 # Read-тулом.
                 if media_path:
-                    emit(f"[image: {media_path}]")
+                    emit(common.attachment_line(media_path))
                 db.mark(conn, update_id, "in_progress" if args.defer_read else "read")
                 # ✍ «взял в работу»: сообщение ушло в сессию.
                 common.set_reaction(token, chat_id, message_id, common.REACTION_WORKING)

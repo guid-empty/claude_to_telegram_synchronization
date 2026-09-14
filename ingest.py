@@ -29,22 +29,31 @@ TYPO_CUTOFF = 0.6
 
 
 def _attachment_file_id(msg):
-    """file_id of an image in this message, or None.
+    """(file_id, file_name) of an attachment in this message, or (None, None).
 
-    Two shapes matter: "photo" (compressed — Telegram sends an array of sizes,
-    the last is the largest) and "document" (sent as a file, i.e. uncompressed —
-    which is how screenshots usually arrive when quality matters).
+    Three shapes matter: "photo" (compressed — Telegram sends an array of sizes,
+    the last is the largest), "document" (sent as a file — screenshots when
+    quality matters, and ANY other file: json, csv, logs, archives) and the
+    audio/video kinds that carry a file_id just the same.
+
+    Documents used to be taken only when mime_type started with "image/", so a
+    json sent to a session arrived as an empty message and the sender saw it
+    delivered — the work it was meant to unblock simply stalled. A file is a
+    file: whatever the user attached is what they wanted to hand over.
     """
     photo = msg.get("photo")
     if photo:
-        return photo[-1]["file_id"]
-    doc = msg.get("document") or {}
-    if str(doc.get("mime_type", "")).startswith("image/"):
-        return doc.get("file_id")
-    return None
+        return photo[-1]["file_id"], None
+    for key in ("document", "audio", "video", "voice", "video_note",
+                "animation"):
+        item = msg.get(key) or {}
+        if item.get("file_id"):
+            return item["file_id"], item.get("file_name")
+    return None, None
 
 
-def _delivery_warning(unknown_tags, untagged_count, auto_routed_to, known):
+def _delivery_warning(unknown_tags, untagged_count, auto_routed_to, known,
+                      continuation_count=0, inherited_to=None):
     """Текст предупреждения о недоставленных сообщениях, или None.
 
     Собирается ОДИН раз за прогон, а не на каждое сообщение: три подряд
@@ -65,15 +74,29 @@ def _delivery_warning(unknown_tags, untagged_count, auto_routed_to, known):
             f"и выбрать за вас нельзя."
         )
 
+    if continuation_count:
+        word = "часть" if continuation_count == 1 else f"частей: {continuation_count} —"
+        lines.append(
+            f"ℹ️ Продолжение длинного сообщения ({word} без тега, Telegram режет "
+            f"текст по 4096 символов) доставлено тому же адресату."
+        )
+
+    if inherited_to:
+        lines.append(
+            f"ℹ️ Сообщение без тега доставлено ${inherited_to} — по предыдущему "
+            f"сообщению. Если адресат другой, поставьте тег."
+        )
+
     if auto_routed_to:
         lines.append(
             f"ℹ️ Сообщение без тега доставлено единственной активной сессии: "
             f"{auto_routed_to}"
         )
-        return "\n".join(lines)  # это не проблема, хвост про «укажите тег» лишний
 
-    if not lines:
-        return None
+    # Доставленное — не проблема: хвост про «укажите тег» и список сессий здесь
+    # только шумит. Он нужен, лишь когда что-то реально осталось недоставленным.
+    if not unknown_tags and not untagged_count:
+        return "\n".join(lines) if lines else None
 
     if known:
         lines.append("")
@@ -124,10 +147,10 @@ def ingest(conn, token, chat_id):
             continue
         if str(msg.get("from", {}).get("id", "")) != chat_id:
             continue
-        file_id = _attachment_file_id(msg)
+        file_id, file_name = _attachment_file_id(msg)
         if file_id:
             media_by_uid[u["update_id"]] = common.download_file(
-                token, file_id, str(u["update_id"])
+                token, file_id, str(u["update_id"]), file_name=file_name
             )
 
     # Список читается один раз на прогон: он не меняется, пока мы разбираем
@@ -136,6 +159,8 @@ def ingest(conn, token, chat_id):
     unknown_tags = set()
     untagged_count = 0
     auto_routed_to = None
+    continuation_count = 0
+    inherited_to = None
 
     for u in updates:
         uid = u["update_id"]
@@ -151,27 +176,53 @@ def ingest(conn, token, chat_id):
         # latter would strip the routing tag off every image.
         text = msg.get("text") or msg.get("caption") or ""
         group_id = msg.get("media_group_id")
-        tag = common.find_tag(text)
+        raw_tag = common.find_tag(text)
+        tag = raw_tag
+        # Тег, набранный в русской раскладке ($Ы6 вместо $S6), принимаем только
+        # если после перевода он совпал с ЖИВОЙ сессией. Без этой оговорки
+        # обычное русское слово после «$» превратилось бы в выдуманный адрес и
+        # утащило сообщение в несуществующую сессию — хуже, чем не узнать тег.
+        if raw_tag and not raw_tag.isascii():
+            fixed = common.layout_fix(raw_tag)
+            tag = fixed if fixed in known else None
         problem = None  # 'unknown_tag' | 'untagged' | 'auto_routed' | None
         if tag:
-            owner, clean = tag, common.strip_tag(text, tag)
+            owner, clean = tag, common.strip_tag(text, raw_tag)
             # Сообщение сохраняем ПОД УКАЗАННЫМ тегом даже если такой сессии
             # нет: она может появиться позже и заберёт его. Предупреждение —
             # не отказ в приёме, а сигнал о вероятной опечатке.
             if tag not in known:
                 problem = "unknown_tag"
         else:
-            # Albums arrive as one update per photo with the caption on the first
-            # only, so inherit the owner the album was already routed to.
-            inherited = db.owner_of_media_group(conn, group_id)
             clean = text
-            if inherited:
-                owner = inherited
+            tg_date = msg.get("date")
+            # Порядок разрешения адресата — от факта к догадке. Первые два
+            # шага опираются на признаки, у которых нет разумного другого
+            # объяснения; последние два — предположения, и потому о них
+            # сообщается в чат.
+            #
+            # 1. Albums arrive as one update per photo with the caption on the
+            #    first only, so inherit the owner the album was already routed to.
+            # 2. Хвост сообщения, разрезанного клиентом по лимиту в 4096
+            #    символов: тег остался в первой части, продолжение приходило
+            #    без него и оседало в unrouted. Проверено на живой базе —
+            #    сообщение на 7882 символа приехало как 4077 + 3805 с одним и
+            #    тем же tg_date, и вторая половина не дошла ни до кого.
+            # 3. Сообщение сразу вслед за адресованным (картинка вдогонку,
+            #    «ок», уточнение) — наследует того же адресата.
+            # 4. Активна ровно одна сессия — двусмысленности нет.
+            owner = db.owner_of_media_group(conn, group_id)
+            if owner:
+                pass
+            elif db.continuation_owner(conn, uid, tg_date):
+                owner = db.continuation_owner(conn, uid, tg_date)
+                problem = "continuation"
+            elif db.recent_owner(conn, uid, tg_date, known):
+                owner = db.recent_owner(conn, uid, tg_date, known)
+                problem = "inherited"
             elif len(known) == 1:
-                # Двусмысленности нет: адресат ровно один, и «не доставить»
-                # здесь было бы педантизмом — сообщение всё равно может уйти
-                # только ему. При двух и более сессиях угадывать нельзя:
-                # чужая сессия начнёт делать не свою работу.
+                # При двух и более сессиях угадывать нельзя: чужая сессия
+                # начнёт делать не свою работу.
                 owner = known[0]
                 problem = "auto_routed"
             else:
@@ -197,6 +248,10 @@ def ingest(conn, token, chat_id):
                 untagged_count += 1
             elif problem == "auto_routed":
                 auto_routed_to = owner
+            elif problem == "continuation":
+                continuation_count += 1
+            elif problem == "inherited":
+                inherited_to = owner
 
     conn.commit()
     db.prune(conn, now)
@@ -218,7 +273,8 @@ def ingest(conn, token, chat_id):
     # Предупреждение уходит последним и в try: подсказка полезна, но потерять
     # из-за неё уже сохранённые сообщения нельзя. Отправляем своим же ботом —
     # исходящие в getUpdates не возвращаются, петли не будет.
-    warning = _delivery_warning(unknown_tags, untagged_count, auto_routed_to, known)
+    warning = _delivery_warning(unknown_tags, untagged_count, auto_routed_to, known,
+                                continuation_count, inherited_to)
     if warning:
         try:
             common.send_message(token, chat_id, warning)

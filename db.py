@@ -109,7 +109,15 @@ def known_sessions(conn, now_epoch=None, max_age_sec=KNOWN_SESSION_AGE_SEC):
 
 def store(conn, update_id, session_id, text, tg_date, received_at, media_path=None,
           media_group_id=None, message_id=None):
-    """Idempotent insert (dedup by update_id). Returns True if a new row was added."""
+    """Idempotent insert (dedup by update_id). Returns True if a new row was added.
+
+    An existing row gets its media_path filled in when it is still empty. The
+    row can predate the file: the message is stored on the first ingest, and a
+    later run may be the one that manages to download the attachment (a failed
+    download never costs us the message). Without this the file sat on disk
+    while the message claimed to have none — exactly how two json files sent as
+    an album arrived empty on 14.09.2026.
+    """
     cur = conn.execute(
         "INSERT OR IGNORE INTO messages"
         "(update_id, session_id, text, tg_date, received_at, media_path, media_group_id,"
@@ -118,7 +126,14 @@ def store(conn, update_id, session_id, text, tg_date, received_at, media_path=No
         (update_id, session_id, text, tg_date, received_at, media_path, media_group_id,
          message_id),
     )
-    return cur.rowcount > 0
+    inserted = cur.rowcount > 0
+    if not inserted and media_path:
+        conn.execute(
+            "UPDATE messages SET media_path=? WHERE update_id=?"
+            " AND (media_path IS NULL OR media_path='')",
+            (media_path, update_id),
+        )
+    return inserted
 
 
 def owner_of_media_group(conn, media_group_id):

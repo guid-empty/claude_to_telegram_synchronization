@@ -193,6 +193,31 @@ class RoutingTest(unittest.TestCase):
         self.assertTrue(str(media_path).endswith("data.json"),
                         f"путь к файлу должен доехать: {media_path}")
 
+    def test_media_path_is_filled_in_on_a_later_run(self):
+        """Файл, скачанный позже сообщения, дописывается в его строку.
+
+        Сообщение сохраняется на первом проходе, а вложение может доехать
+        только на следующем — скачивание не должно стоить нам сообщения,
+        поэтому его отсутствие не ошибка. Раньше INSERT OR IGNORE молча
+        пропускал такую строку, и файл оставался на диске, а сообщение
+        утверждало, что вложения нет.
+        """
+        db.touch_session(self.conn, "alpha")
+        db.store(self.conn, 901, "alpha", "первый проход", 0, 0, None)
+        self.conn.commit()
+
+        db.store(self.conn, 901, "alpha", "первый проход", 0, 0, "/tmp/f.json")
+        self.conn.commit()
+
+        rows = db.inbox(self.conn, "alpha")
+        self.assertEqual(rows[0][2], "/tmp/f.json")
+
+        # Уже заполненный путь не перетирается: первая удачная загрузка и есть
+        # та, на которую ссылались в доставке.
+        db.store(self.conn, 901, "alpha", "первый проход", 0, 0, "/tmp/other.json")
+        self.conn.commit()
+        self.assertEqual(db.inbox(self.conn, "alpha")[0][2], "/tmp/f.json")
+
     def test_attachment_line_names_a_file_a_file(self):
         """Картинку надо открыть, файл — прочитать; подписи разные."""
         self.assertTrue(common.attachment_line("/x/a.jpg").startswith("[image:"))
